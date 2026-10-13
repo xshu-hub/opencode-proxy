@@ -2,6 +2,7 @@
  * Original page renderers remain in app.js/caller-keys.js. No Magpie server,
  * credentials, or provider HTTP calls are used by this adapter. */
 let proxyState=null,proxyModels=[],proxyReading=0;
+const magpieLoadProviders=loadProviders;
 const proxyDetails=new Map();
 const proxyDesktop=()=>window.go?.main?.Desktop;
 async function proxyRequest(route,body){
@@ -118,10 +119,10 @@ ledContentBox=function(c){if(!c.raw)return proxyContentBox(c);const box=el('div'
 loadQuotas=async()=>{quotas=[];};
 renderArchive=()=>{};
 loadCLIs=loadInstalls=cliBehindOnce=whatsNewOnce=renderUpdateBadge=loadUpstream=refreshLanes=async()=>{};
-markUpstream=renderMovable=renderExcluded=renderProviderDiscovery=()=>{};
+markUpstream=renderMovable=renderExcluded=renderProviderDiscovery=discoverLocalProviders=renderAgents=renderAgentsLoading=()=>{};
 setGatewayMode=()=>{};
-load=async function(){try{await proxyRead(!proxyModels.length);applyPrefs(proxyPrefs());if(view==='gateway')renderGatewayView();if(view==='providers'&&!editing)renderProviders();if(view==='usage')await refreshUsage();if(view==='settings')await loadSettings();}catch(e){status(e.message,'err');}};
-loadProviders=async function(){await proxyRead(!proxyModels.length);if(view==='gateway')renderGatewayView();if(view==='providers')renderProviders();};
+load=async function(){try{if(view==='gateway'||view==='providers'&&!editing)await magpieLoadProviders();else if(view==='usage')await refreshUsage();else if(view==='settings')await loadSettings();applyPrefs(proxyPrefs());}catch(e){status(e.message,'err');}};
+loadProviders=magpieLoadProviders;
 loadSettings=async function(){await proxyRead();prefs=proxyPrefs();renderSettings();};
 renderSettings=function(){
   const page=$('#view-settings');page.querySelectorAll('.set-page').forEach(p=>p.hidden=true);let host=$('#setPage-general');host.hidden=false;host.replaceChildren();const tabs=$('#setTabs');tabs.replaceChildren();
