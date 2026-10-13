@@ -87,11 +87,12 @@ function proxyResetModel(m){draft.proxyUpdates[m.raw.target]={context:null,outpu
 // Exported model IDs stay short, while internal provider/model identity survives.
 gatewayModels=function(){return providers.providers.flatMap(p=>p.models.filter(m=>m.on).map(m=>({id:m.id,name:m.name,provider:p,context:m.context,output:m.output,efforts:m.efforts,images:false})));};
 for(const k of Object.keys(FLAVORS))if(!['openai','responses','anthropic'].includes(k))delete FLAVORS[k];
+FLAVORS.responses.note='Responses 接口：文本、思考和客户端函数工具。会话历史由客户端传入。';
 if(!FLAVORS[flavor])flavor='openai';
 const proxyRenderGateway=renderGateway;
 renderGateway=function(){proxyRenderGateway();$('#gateway .sub').textContent=proxyModels.filter(m=>m.enabled).length+' 个模型 · 三种 API · 由全局 OpenCode 推理';const stop=el('button','text action',proxyState.running?'停止网关':'启动网关');stop.onclick=async()=>{stop.disabled=true;try{await proxyRequest(proxyState.running?'/admin/stop':'/admin/start',{});await proxyRead();renderGatewayView();}catch(e){status(e.message,'err');stop.disabled=false;}};$('#gateway .who').append(stop);};
 const proxyRenderConnect=renderConnect;
-renderConnect=function(){if(!providers)return;proxyRenderConnect();$('#connectNote').textContent='所有请求需要启用的 Key';for(const e of $('#connect').querySelectorAll('.hint')){if(e.textContent.includes('provider/model'))e.textContent='使用下方纯模型名或别名。点击模型即可放入示例。';if(e.textContent.includes('magpie'))e.textContent=e.textContent.replaceAll('magpie','OpenCode Proxy');}};
+renderConnect=function(){if(!providers)return;proxyRenderConnect();if(!connectFolded)$('#connectNote').textContent='所有请求需要启用的 Key';for(const e of $('#connect').querySelectorAll('.hint')){if(e.textContent.startsWith('Choose a gateway key'))e.textContent='选择启用的网关 Key，填入 '+(FLAVORS[flavor].keyEnv||'Authorization: Bearer')+'。';if(e.textContent.includes('provider/model'))e.textContent='使用下方纯模型名或别名。点击模型即可放入示例。';if(e.textContent.includes('magpie'))e.textContent=e.textContent.replaceAll('magpie','OpenCode Proxy');}};
 renderActivity=()=>{};
 loadQuotas=async()=>{quotas=[];};
 renderArchive=()=>{};
