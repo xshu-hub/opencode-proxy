@@ -25,7 +25,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 12
     defaults:
       run:
         shell: bash
@@ -35,19 +35,41 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm test
-      - name: Package standalone tool
-        run: |
-          mkdir -p artifacts
-          npm pack --ignore-scripts --pack-destination artifacts
-          cp README.md config.example.json LICENSE artifacts/
-          node -e 'const fs=require("fs"),crypto=require("crypto"),path=require("path");fs.writeFileSync("artifacts/SHA256SUMS",fs.readdirSync("artifacts").map(n=>crypto.createHash("sha256").update(fs.readFileSync(path.join("artifacts",n))).digest("hex")+"  "+n).join("\n")+"\n")'
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
+      - uses: oven-sh/setup-bun@v2
         with:
-          name: opencode-proxy
-          path: artifacts/
+          bun-version: 1.4.2
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Windows'
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
+      - run: npm run build:ui
+      - run: npm test
+      - name: Build standalone client and server
+        run: node scripts/package.mjs $PLATFORM
+        env:
+          PLATFORM: ${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+      - name: Install real OpenCode for packaged runtime verification
+        run: |
+          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35 @opencode-ai/plugin@1.18.35
+          node -e 'const fs=require("fs"),path=require("path");const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json"));const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode);fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\nTEST_PACKAGED_PROXY="+path.resolve("dist",process.platform==="win32"?"windows/opencode-proxy-server.exe":"linux/opencode-proxy-server")+"\n")'
+      - name: Verify packaged server through real OpenCode
+        run: node --test --test-name-pattern='managed20:' test/global.test.mjs
+      - name: Archive standalone application
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.2.0-windows-x64.zip'
+          else
+            tar -czf dist/opencode-proxy-0.2.0-linux-x64.tar.gz -C dist/linux .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-proxy-${{ runner.os }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
   compatibility:

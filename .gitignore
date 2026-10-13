@@ -6,3 +6,9 @@ config.json
 *.tgz
 artifacts/
 coverage/
+frontend/dist/
+desktop/ui/
+dist/
+statistics.json
+requests/
+desktop.log

@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/opencode-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Standalone OpenAI-compatible API through the real global OpenCode program",
   "license": "MIT",
@@ -18,7 +18,8 @@
     "README.md",
     "LICENSE",
     "NOTICE.txt",
-    "docs"
+    "docs",
+    "frontend/dist"
   ],
   "engines": {
     "node": ">=22"
@@ -29,9 +30,12 @@
     "opencode"
   ],
   "scripts": {
-    "test": "node --test test/unit.test.mjs test/command.test.mjs test/reasoning.test.mjs test/catalog.test.mjs test/stream.test.mjs test/lifecycle.test.mjs test/http-server.test.mjs",
+    "test": "node --test test/unit.test.mjs test/command.test.mjs test/reasoning.test.mjs test/catalog.test.mjs test/stream.test.mjs test/lifecycle.test.mjs test/http-server.test.mjs test/management.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/global.test.mjs",
-    "start": "node bin/serve.mjs"
+    "start": "node bin/serve.mjs",
+    "build:ui": "npm run build --prefix frontend",
+    "package:windows": "node scripts/package.mjs windows",
+    "package:linux": "node scripts/package.mjs linux"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.35"

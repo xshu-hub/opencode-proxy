@@ -3,3 +3,6 @@ https://github.com/xshu-hub/magpie/tree/210234a5f33e0f2643f82b4337e249cf0fe81371
 Original bridge version: 0.13.0.
 Retains the original MIT license and copyright notice.
 This repository contains no Magpie application or plugin adapter.
+
+The UI reuses/adapts Magpie app.css tokens and ledger strip styles.
+The metric rules ledDecode/ledRowSpeed and flowMs derive from Magpie app.js, gateway/ttft.go, and usage/usage.go at the same source commit. All retain the original MIT notice.

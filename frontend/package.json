@@ -1,0 +1,21 @@
+{
+  "name": "opencode-proxy-ui",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@xshu-hub/opencode-proxy": "file:..",
+    "naive-ui": "2.45.3",
+    "vue": "3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.10",
+    "typescript": "^5.9.3",
+    "vite": "8.3.4",
+    "vue-tsc": "3.3.13"
+  }
+}

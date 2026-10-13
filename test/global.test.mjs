@@ -10,6 +10,7 @@ import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { createProxyServer } from '../lib/http-server.mjs';
+import { spawn } from 'node:child_process';
 
 if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real OpenCode global-state test.');
 const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND);
@@ -813,4 +814,38 @@ test('reuse13: a slow downstream reader does not idle-timeout an upstream that h
     assert.equal(chunks.at(-1).choices[0].finish_reason,'stop');
     assert.equal(chunks.map(c=>c.choices[0]?.delta?.content??'').join(''),'你好🙂\n\n```python\n'+auditStream.tail.join(''));
   } finally {auditStream.release.resolve();await instance.close();}
+});
+
+test('managed20: packaged server uses real global OpenCode, aliases, defaults and full request logs with persistent statistics', {timeout:90000}, async t=>{
+  if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate the packaged server.');return;}
+  const file=path.join(home,'managed-config.json');
+  await writeFile(file,JSON.stringify({mode:'global',command,workingDirectory,host:'127.0.0.1',port:0,timeoutMs:0,workerReuse:true,diagnostics:false,apiKeys:[{id:'managed-key',name:'测试客户端',key:'fixture-client-access-key',enabled:true}],modelOverrides:{'fixture-api/mock':{alias:'desktop-model',defaults:{temperature:0.4,max_tokens:100}}}}));
+  let child,exited,base;
+  const launch=async()=>{
+    child=spawn(process.env.TEST_PACKAGED_PROXY,['--config',file,'--admin-port','0'],{env:{...process.env,OPENCODE_PROXY_ADMIN_KEY:'fixture-admin-access-key'},windowsHide:true,stdio:['ignore','pipe','pipe']});
+    let output='',stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    exited=new Promise(resolve=>child.once('exit',resolve));
+    base=await new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('Packaged server startup timed out: '+stderr)),10000);
+      child.once('error',reject);child.once('exit',()=>{clearTimeout(timeout);reject(new Error('Packaged server exited: '+stderr));});
+      child.stdout.on('data',data=>{output+=data;const line=output.split(/\r?\n/).find(l=>l.startsWith('OPENCODE_PROXY_READY '));if(line){clearTimeout(timeout);resolve(JSON.parse(line.slice('OPENCODE_PROXY_READY '.length)).adminURL);}});
+    });
+  };
+  const admin=(route,method='GET',body)=>fetch(base+route,{method,headers:{authorization:'Bearer fixture-admin-access-key','content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  const stop=async()=>{if(!child)return;const current=child;let timer;await admin('/admin/shutdown','POST',{}).catch(()=>{});try{await Promise.race([exited,new Promise(resolve=>{timer=setTimeout(()=>{current.kill();resolve();},5000);})]);}finally{clearTimeout(timer);child=undefined;}};
+  try{
+    await launch();
+    const models=await(await admin('/admin/models')).json();assert.ok(models.models.some(m=>m.id==='desktop-model'),JSON.stringify(models));
+    const state=await(await admin('/admin/state')).json();assert.equal(state.running,true);
+    const tools=['weather','clock'].map(name=>({type:'function',function:{name,parameters:{type:'object',properties:{city:{type:'string'}}}}}));
+    const body={model:'desktop-model',messages:[{role:'system',content:'CLIENT_FULL_PROMPT_SENTINEL'},{role:'user',content:'Call tools'}],stream:true,tools};
+    const response=await fetch(state.endpoint+'/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});
+    assert.equal(response.status,200);const text=await response.text();assert.match(text,/tool_calls/);assert.match(text,/北京/);
+    const final=await(await admin('/admin/state')).json();assert.equal(final.statistics.totals.requests,1);assert.equal(final.statistics.totals.outputTokens,5);
+    const row=final.statistics.rows[0];assert.ok(row.ttftMs>0);assert.equal(row.usage.completion_tokens,5);assert.equal(row.target,'fixture-api/mock');
+    const detail=await(await admin('/admin/request/'+row.id)).json();assert.deepEqual(detail.requestedBody,body);assert.equal(detail.effectiveBody.temperature,0.4);assert.equal(detail.effectiveBody.max_tokens,100);assert.match(detail.responsePreview,/tool_calls/);assert.equal(JSON.stringify(detail).includes('fixture-client-access-key'),false);
+    assert.equal(requests.at(-1).body.temperature,0.4);assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
+    assert.equal((await readFile(path.join(home,'statistics.json'),'utf8')).includes('CLIENT_FULL_PROMPT_SENTINEL'),false);
+    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,1);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].alias,'desktop-model');
+  }finally{await stop();}
 });
