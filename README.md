@@ -1,100 +1,59 @@
 # OpenCode Proxy
 
-对外提供 **OpenAI Chat Completions、OpenAI Responses、Anthropic Messages** 三种协议，共用模型、别名、访问 Key、日志和统计；请求均经过真实全局 OpenCode。支持范围与原生协议的差异见 [协议说明](docs/protocols.md)。
+独立 OpenCode 反向代理。推理经过真实全局 OpenCode，复用其供应商配置、登录与认证插件，不修改 OpenCode。对外提供 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages，支持流式文本与客户端函数工具。
 
-独立的 OpenCode 反代工具，带 Windows EXE 客户端和 Linux 服务端。
-客户端 → OpenCode Proxy → 真实全局 OpenCode → 已配置的上游供应商。
+0.7.0 同步并精简 Magpie 最新前端（`a75de4c2`）：仅保留模型和网关，移除统计及请求记录。Windows 使用 Wails 2 + Go + WebView2；Linux 使用独立服务和浏览器界面。没有 Electron，成品运行无需 Node.js 或 Bun。
 
-0.6.0 以 Magpie 完整前端源码为底稿修改精简，旧版自制页面已删除。保留原供应商列表、模型编辑器、网关接入示例、访问 Key、用量图表、请求表格、弹窗和菜单。具体源码范围与裁剪说明见 [前端移植说明](docs/frontend-port.md) 和 NOTICE.txt。
-供应商开关即时保存；模型编辑器内的勾选、别名和参数通过“保存”一次提交，取消可丢弃修改。停用模型从 `/v1/models` 隐藏，短名、别名及原生完整 ID 的新请求均返回 403，三种协议一致。已运行的请求继续完成。支持供应商分组、模型搜索和批量选择。
+## Windows
 
-## Windows 客户端
+完整解压，运行 `opencode-proxy.exe`，保留同目录 `opencode-proxy-server.exe` 和 resources。全局 opencode 应在当前用户 PATH 中可用；必要时在设置 → OpenCode 指定程序和工作目录。
 
-下载 Windows 压缩包并完整解压，双击 `opencode-proxy.exe`。同目录中的服务 EXE 和 resources 必须保留。无需另外安装 Node.js 或 Bun；仍需要已安装、能够正常对话的全局 OpenCode，以及 Windows WebView2 运行时。
+- **模型**：点击供应商行编辑；模型芯片控制启用。“名称与推理档位”设置纯名称/别名、上下文/输出上限、默认 Temperature / Top P / 输出 Token、默认思考强度、原生或自定义可选档位，修改后保存。
+- **网关**：启动、停止、重启，选择三种协议查看连接地址与示例；创建、复制、启停、重命名或轮换访问 Key。
+- **设置**：OpenCode、工作目录、超时、监听地址和端口、外观、后台运行。
 
-界面提供：
+参数留空跟随 OpenCode，客户端显式参数优先。上限不能超过 OpenCode 报告的值，别名不能冲突。自定义思考档位仍需上游 SDK 与模型支持；未知 SDK 保留原生档位。
 
-- 网关：API 状态、连接地址、活动请求、Token、平均首字、速度和模型测试。
-- 设置：程序路径、原生目录选择、工作目录、监听地址、端口、时限和进程复用。
-- 模型：自动模型发现，配置对外模型名、上下文/输出上限、temperature、top_p、max_tokens、reasoning_effort。
-- 访问 Key：生成、编辑、复制、停用或移除多个客户端 Key。
-- 调用日志：首字、速度、Token、缓存、耗时、状态、错误、进程复用及完整请求/响应详情。
-- 用量统计：按模型汇总和每日趋势，重启后继续保留。
+默认配置 `%LOCALAPPDATA%\OpenCodeProxy\config.json`。关闭窗口隐藏到托盘，网关继续运行。再次启动 EXE、点击托盘图标或菜单“打开”恢复窗口；“退出程序”才停止服务。`opencode-proxy.exe --background` 启动到托盘。
 
-参数留空时跟随 OpenCode；客户端显式参数优先。配置上限不能超过 OpenCode 报告的上限。模型别名不能与其他模型冲突。
-
-默认配置位置是 `%LOCALAPPDATA%\OpenCodeProxy\config.json`。统计保存在同目录 statistics.json，完整请求和原始响应保存在 requests 目录。关闭桌面窗口隐藏到托盘，网关继续运行；设置 → 常规 → 退出程序会停止后台服务。可用 `--background` 启动到后台。
-
-## Linux 服务端
-
-完整解压 Linux 包，直接运行：
+## Linux
 
 ```sh
 chmod +x opencode-proxy-server
 ./opencode-proxy-server --host 0.0.0.0 --port 8787
 ```
 
-同样不需要安装 Node.js 或 Bun。OpenCode 必须在同一运行用户的 PATH 中可用，或用 `--opencode /完整路径/opencode` 指定。读取该用户的全局供应商配置和登录；不要用其他用户的服务进程来期望复用当前用户的登录。
+OpenCode 必须属于同一运行用户，且在 PATH 可用，或用 `--opencode /路径/opencode` 指定。`--working-directory /目录` 指定工作目录。后台运行可使用 systemd 或终端会话管理。
 
-默认管理页面 `http://127.0.0.1:8788`，API 基址 `http://127.0.0.1:8787/v1`。管理端只监听回环地址，远程管理可使用 SSH 转发：
+默认管理页面 `http://127.0.0.1:8788`，API 基址 `http://127.0.0.1:8787/v1`。管理端只监听本机；远程管理使用 SSH 转发：
 
 ```sh
 ssh -L 8788:127.0.0.1:8788 user@server
 ```
 
-然后在本机浏览器打开同一个管理地址。默认配置在 `${XDG_CONFIG_HOME:-$HOME/.config}/OpenCodeProxy/config.json`，可用 `--config /路径/config.json` 覆盖。
+默认配置 `${XDG_CONFIG_HOME:-$HOME/.config}/OpenCodeProxy/config.json`，可用 `--config /路径/config.json` 覆盖。使用其他用户运行服务不会复用当前用户登录。
 
-## 客户端连接
+## 连接与行为
 
-在 Cherry Studio 等 OpenAI 兼容客户端填写 API 基址和界面中的访问 Key，再刷新模型列表。对外支持 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`，包含 JSON、流式文本和客户端 function tools。Anthropic SDK 使用不含 `/v1` 的服务器根地址。暂不支持图片、音频和 embeddings；其他协议差异见 [协议说明](docs/protocols.md)。
+Cherry Studio 等客户端填写 API 地址与访问 Key，再刷新模型列表。支持 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`。Anthropic SDK 使用不含 /v1 的根地址。首次启动自动生成访问 Key；它与供应商凭证不同。
 
-未配置访问 Key 时首次启动自动生成，可从本地界面查看/复制。`OPENCODE_PROXY_API_KEY` 或旧 `BRIDGE_API_KEY` 仅用于首次生成配置时的初始值；后续以保存的配置为准。这些是反代访问密钥，不是供应商凭证。
+不再采集持久化统计、不存储提示词/工具参数及原始请求/响应；不读取、不删除旧统计文件。响应中真实 usage 仍转发。必要的进程错误和可选诊断仍可输出到终端。
 
-## 与 Magpie 一致的统计口径
+- 不限制 OpenCode 版本，兼容性由其公开 API/hooks 决定。
+- 默认不限并发，每个活动请求独占进程、会话和数据库。默认最多复用两个健康空闲工作进程，空闲 60 秒退出。
+- 供应商、登录与认证插件由全局 OpenCode 管理。客户端系统提示与历史通过公开 hooks 替换默认代理提示；认证插件的参数、请求头及 fetch 逻辑仍可能运行。
+- 禁止执行本地内置工具，function tools 由客户端执行。参数在完整 JSON 后返回，没有逐字符工具参数 delta。暂不支持图片、音频、embeddings；详见 [协议说明](docs/protocols.md)。
+- 首输出默认 120 秒，输出空闲默认 180 秒，总时长默认不限。旧配置总超时仍生效，可在设置中改为 0。
 
-直接复用/移植 Magpie 的 ledDecode、ledRowSpeed、flowMs 和统计样式；来源及 MIT 许可见 NOTICE.txt。
-
-- 首字从当前请求开始，到客户端协议流里出现第一段有效文本、思考或工具调用。非流式没有首字/速度。
-- 首字均值只计成功的流式请求。失败数包含取消，界面另列取消数。
-- 思考回复的速度只算答案 Token，从首段正文开始；不把思考 Token 混入输出速度。
-- 解码窗口不足 100 ms、超过 10000 Token/s、内容集中在窗口的不足四分之一、或正文比思考快超过 20 倍等异常/批量释放数据，不进入速度均值。平均速度为有效样本 Token 总量除以有效窗口总量，不是每条速度的简单平均。
-- 普通输入、输出、缓存读取、缓存写入、思考分别记录；缓存读写与普通输入分开，输出含思考但速度排除思考。用量以 OpenCode 实际返回为准，缺失时不估算。
-- 日统计按服务端本地时区分组，调用时间按查看页面的客户端时区显示。
-- 同样的计算规则不表示与另一层网关测出的毫秒值逐字相等：当前工具的时钟从自身收到请求开始。
-
-完整客户端请求体（含提示词、历史、工具定义和参数）、应用默认参数后的生效请求，以及原始响应都保存在本地。响应预览上限 2 MiB，完整字节保存在详情显示的文件中。最近保留 250 条明细及对应请求文件；累计统计持续保存。Authorization、访问 Key 和供应商认证头不写入请求日志。生效请求仍是客户端 Chat 协议的输入，不等于供应商最终 HTTP 请求字节。
-
-## 思考强度与后台运行
-
-模型 → 参数与别名，直接选择中文思考档位；“配置可选思考档位”可勾选档位，支持原生 Anthropic SDK 的模型可输入思考预算（至少 1024，且小于最大输出）。程序根据 OpenCode 报告的 SDK 生成参数，不要求填写 JSON。未知 SDK 保留原生档位。客户端明确指定时优先，配置只作用于本工具；上游仍须支持所选档位。0.4.0 的已有高级映射继续兼容读取。
-
-当前版本并未完整移植 Magpie 的全部页面功能。已核实的缺项、参考源码与分步验收条件见 [Magpie 对照审查](docs/magpie-parity.md)。
-
-Windows 关闭窗口默认隐藏到托盘并继续提供 API。点击托盘图标、托盘菜单“打开 OpenCode Proxy”或重新启动 EXE 可恢复窗口；托盘菜单“退出并停止服务”和页面“退出程序”才会停止服务。运行 `opencode-proxy.exe --background` 可启动到托盘。托盘初始化失败时保留可见窗口，关闭仍能退出。最小化保留任务栏窗口。
-
-Linux 使用独立服务程序，后台运行可通过 systemd 或终端会话管理；浏览器管理页关闭不会停止服务。
-
-## OpenCode 行为
-
-不按版本白名单限制；所有推理必须经过真实 OpenCode，不修改其源码或二进制。支持与否由公开 API/hooks 决定。
-
-- 默认不限并发，每个活动请求独占进程、会话和数据库。
-- 默认复用健康空闲进程，保留最多两个，空闲 60 秒退出；旧会话删除并通过公开 /global/dispose 完成实例释放后才复用。
-- 全局供应商、登录和认证插件继续由 OpenCode 管理。客户端系统提示与历史通过公开 hooks 替换默认代理提示；第三方认证插件仍加载，其参数、请求头和 fetch 逻辑可能运行。
-- 本地内置工具禁止执行，function tools 由客户端执行。工具参数目前在完整 JSON 后返回，没有原始逐字符参数 delta。MCP 根 schema 的 additionalProperties 会受原生转换影响。
-- 首输出默认 120 秒、输出空闲默认 180 秒、总时长默认不限。旧配置 timeoutMs:120000 仍限制总时长，需要改为 0 或删除。
-
-## 开发构建
+## 开发
 
 ```sh
 npm ci --ignore-scripts
 npm ci --prefix frontend --ignore-scripts
 npm run build:ui
 npm test
-npm run package:windows  # 需要 Go 和 Bun
-npm run package:linux   # 需要 Bun
+npm run package:windows  # Go + Bun
+npm run package:linux    # Bun
 ```
 
-Windows 桌面使用 Wails 2 + Go + WebView2。界面直接修改精简 Magpie 的原始 HTML/CSS/JavaScript，通过独立资源构建脚本打包，无需构建 Magpie。服务核心使用 JavaScript，通过 Bun 打包。OpenCode 原生 worker 的脚本资源作为文件交给 OpenCode 加载。
-
-GitHub 默认构建 Windows 和 Linux 产物，执行快速测试、前端 JavaScript 语法检查，并使用真实 OpenCode 1.18.35 与本地模拟供应商验证打包后的服务、别名/参数、工具流、完整日志与重启统计。手动 compatibility 才运行另外四组合完整测试。不会构建 Magpie，也不会在 CI 调用生产账号。
+GitHub 构建 Windows/Linux，检查前端语法、单元测试、Windows 托盘，以及真实 OpenCode 1.18.35 + 本地模拟供应商的打包后集成测试。不调用生产账号，不构建 Magpie。前端来源见 [移植说明](docs/frontend-port.md)，保留 Magpie MIT 许可证。

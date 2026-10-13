@@ -3,7 +3,6 @@
  * credentials, or provider HTTP calls are used by this adapter. */
 let proxyState=null,proxyModels=[],proxyReading=0;
 const magpieLoadProviders=loadProviders;
-const proxyDetails=new Map();
 const proxyDesktop=()=>window.go?.main?.Desktop;
 async function proxyRequest(route,body){
   const method=body===undefined?'GET':'POST';let code,data;
@@ -12,28 +11,15 @@ async function proxyRequest(route,body){
   if(code>=400)throw Error(data.error?.message||'操作失败（'+code+'）');return data;
 }
 async function proxyRead(models=false){const n=++proxyReading;const result=await Promise.all([proxyRequest('/admin/state'),models?proxyRequest('/admin/models'):Promise.resolve(null)]);if(n===proxyReading||!proxyState)proxyState=result[0];if(result[1])proxyModels=result[1].models;providers=proxyProviders();state={agents:[],profiles:[],settings:proxyPrefs()};}
-function proxyPrefs(){return{theme:localStorage.getItem('opencode-proxy.theme')||'system',lang:'zh',textSize:Number(localStorage.getItem('opencode-proxy.size')||100),plainNames:'plain',currency:'usd',dir:proxyState?.configFile,version:'0.6.0',web:true};}
+function proxyPrefs(){return{theme:localStorage.getItem('opencode-proxy.theme')||'system',lang:'zh',textSize:Number(localStorage.getItem('opencode-proxy.size')||100),plainNames:'plain',currency:'usd',dir:proxyState?.configFile,version:'0.7.0',web:true};}
 window.purposeOptions=()=>[];
 function proxyKeys(){return{keys:(proxyState?.settings.apiKeys||[]).map(k=>({id:k.id,name:k.name,off:!k.enabled,masked:k.key.slice(0,5)+'…'+k.key.slice(-4)}))};}
-function proxyCall(r){return{...r,time:r.startedAt,agent:r.client,model:r.model,from:r.protocol,to:r.protocol,status:r.httpStatus??0,error:r.errorCode,ms:r.elapsedMs,ttft:r.ttftMs,...proxyDetails.get(r.id)};}
 function proxyProviders(){
   const groups=new Map();
   for(const m of proxyModels){const id=m.target.split('/')[0];if(!groups.has(id))groups.set(id,{id,name:id,host:'全局 OpenCode',icon:'opencode',openCode:true,key:{set:false},ready:true,agents:[],models:[],fallback:[],headers:{},picked:[],api:'openai',unlisted:false});const p=groups.get(id);p.models.push({id:m.id,name:m.id,default:m.target.split('/').slice(1).join('/'),on:m.enabled,context:m.context,output:m.output,efforts:m.reasoningEfforts,raw:m});if(m.enabled)p.picked.push(m.id);}
   const ps=[...groups.values()];for(const p of ps)p.off=!p.models.some(m=>m.on);
-  const s=proxyState;return{providers:ps,presets:[],gateway:{running:!!s?.running,mine:true,lan:true,url:s?.endpoint?.replace(/\/v1$/,'')||'http://127.0.0.1:'+(s?.settings.port||8787),models:proxyModels.filter(m=>m.enabled).length,groups:[],calls:[...(s?.statistics.active||[]),...(s?.statistics.rows||[])].map(proxyCall)}};
+  const s=proxyState;return{providers:ps,presets:[],gateway:{running:!!s?.running,mine:true,lan:true,url:s?.endpoint?.replace(/\/v1$/,'')||'http://127.0.0.1:'+(s?.settings.port||8787),models:proxyModels.filter(m=>m.enabled).length,groups:[],calls:[]}};
 }
-function proxyTotal(b={}){return{calls:b.requests||0,errors:b.failed||0,input:b.inputTokens||0,output:b.outputTokens||0,cache_read:b.cachedTokens||0,cache_write:b.cacheWriteTokens||0,reasoning:b.reasoningTokens||0,timed:b.ttftSamples||0,ttft_ms:b.ttftSum||0,decode_ms:b.generationMs||0,decode_out:b.generationTokens||0,unpriced:b.requests||0,cost:0};}
-function proxySum(xs){const t=proxyTotal();for(const x of xs)for(const k of Object.keys(t))t[k]+=x[k]||0;return t;}
-function proxyDate(d){return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
-function proxyRows(q){const cut=new Date();cut.setHours(0,0,0,0);const p=q.get('period');if(p==='7d')cut.setDate(cut.getDate()-6);if(p==='30d')cut.setDate(cut.getDate()-29);return(proxyState.statistics.rows||[]).filter(r=>(p==='all'||new Date(r.startedAt)>=cut)&&(!q.get('day')||proxyDate(new Date(r.startedAt))===q.get('day'))&&(!q.get('failed')||r.httpStatus>=400||r.status==='failed'||r.status==='cancelled')&&(!q.get('agent')||r.client===q.get('agent'))&&(!q.get('provider')||r.target?.split('/')[0]===q.get('provider'))&&(!q.get('model')||r.model===q.get('model'))&&(!q.get('q')||[r.model,r.target,r.client,r.id,r.protocol,r.errorCode].join(' ').toLowerCase().includes(q.get('q').toLowerCase())));}
-function proxyRow(r){return{id:r.id,t:r.startedAt,agent:r.client,agentName:r.client,req:r.model,model:r.target?.split('/').slice(1).join('/')||r.model,effort:r.reasoningEffort,providerName:r.target?.split('/')[0]||'OpenCode',provider:r.target?.split('/')[0]||'OpenCode',ep:r.endpoint,status:r.httpStatus,err:r.errorCode||'',ms:r.elapsedMs,ttft_ms:r.ttftMs,first_text_ms:r.firstTextMs,flow_ms:r.flowMs,in:r.inputTokens||0,out:r.outputTokens||0,cache_read:r.cacheRead||0,cache_write:r.cacheWrite||0,reasoning:r.reasoningTokens||0,source:'gateway',session:r.id,priced:false};}
-function proxyAggregateRows(rows){const total=proxyTotal();for(const r of rows){total.calls++;if(r.httpStatus>=400||r.status==='failed'||r.status==='cancelled')total.errors++;total.input+=r.inputTokens||0;total.output+=r.outputTokens||0;total.cache_read+=r.cacheRead||0;total.cache_write+=r.cacheWrite||0;total.reasoning+=r.reasoningTokens||0;if(r.ttftMs&&r.status==='completed'){total.timed++;total.ttft_ms+=r.ttftMs;}total.decode_ms+=r.generationMs||0;total.decode_out+=r.generationTokens||0;total.unpriced++;}return total;}
-function proxyGroups(rows,key){const map=new Map();for(const r of rows){const id=key(r)||'未知';if(!map.has(id))map.set(id,[]);map.get(id).push(r);}return[...map].map(([id,rs])=>({id,name:id,...proxyAggregateRows(rs)}));}
-function proxyModelAt(rs){return proxyGroups(rs,r=>(r.target?.split('/')[0]||'OpenCode')+'/'+r.model);}
-const proxyBaseLedger=proxyLedger;
-proxyLedger=function(q){const l=proxyBaseLedger(q);l.by.modelAt=proxyModelAt(proxyRows(q));for(const point of l.series){const rs=proxyRows(new URLSearchParams({...Object.fromEntries(q),day:point.time.slice(0,10)}));point.by.modelAt=Object.fromEntries(proxyModelAt(rs).map(x=>[x.id,x]));}return l;};
-function proxyLedger(q){const rs=proxyRows(q),all=proxyState.statistics.rows,offset=Number(q.get('offset')||0),tot=proxyAggregateRows(rs),day=new Map();for(const r of rs){const id=proxyDate(new Date(r.startedAt));if(!day.has(id))day.set(id,[]);day.get(id).push(r);}return{...tot,total:rs.length,offset,rows:rs.slice(offset,offset+100).map(proxyRow),agents:[...new Set(all.map(r=>r.client))].map(id=>({id,name:id})),providers:[...new Set(all.map(r=>r.target?.split('/')[0]).filter(Boolean))].map(id=>({id,name:id})),accounts:[],callerKeys:[],purposes:[],computers:[],through:tot,direct:proxyTotal(),bucket:'day',day:q.get('day')||'',by:{model:proxyGroups(rs,r=>r.model),agent:proxyGroups(rs,r=>r.client),provider:proxyGroups(rs,r=>r.target?.split('/')[0])},series:[...day].sort(([a],[b])=>a.localeCompare(b)).map(([time,rs])=>({time:time+'T12:00:00',...proxyAggregateRows(rs),by:{model:Object.fromEntries(proxyGroups(rs,r=>r.model).map(g=>[g.id,g])),agent:Object.fromEntries(proxyGroups(rs,r=>r.client).map(g=>[g.id,g])),provider:Object.fromEntries(proxyGroups(rs,r=>r.target?.split('/')[0]).map(g=>[g.id,g]))}}))};}
-function proxyUsage(q){const s=proxyState.statistics,p=q.get('period')||'today',from=new Date();from.setHours(0,0,0,0);if(p==='7d')from.setDate(from.getDate()-6);if(p==='30d')from.setDate(from.getDate()-29);const series=Object.entries(s.byDay).filter(([d])=>p==='all'||d>=proxyDate(from)).sort(([a],[b])=>a.localeCompare(b)).map(([d,b])=>({time:d+'T12:00:00',label:d,...proxyTotal(b)}));const total=p==='all'?proxyTotal(s.totals):proxySum(series);return{...total,series,bucket:'day',models:p==='all'?Object.entries(s.byModel).map(([id,b])=>({name:id,...proxyTotal(b)})):[],agents:[],accounts:[],callerKeys:[],path:'statistics.json（累计统计持久化；请求明细保留最近 250 条）'};}
 api=async function(path,body){
   const [route,search='']=path.split('?'),q=new URLSearchParams(search);
   if(route==='open'){window.open(body.url,'_blank','noopener');return{};}
@@ -51,18 +37,13 @@ api=async function(path,body){
     else{if(!key)throw Error('Key 已移除');if(action==='rename-key')key.name=body.name;if(action==='on-key'||action==='off-key')key.enabled=action==='on-key';if(action==='remove-key')keys.splice(keys.indexOf(key),1);if(action==='rotate-key')key.key='ocp_'+Array.from(crypto.getRandomValues(new Uint8Array(24)),x=>x.toString(16).padStart(2,'0')).join('');}
     proxyState=await proxyRequest('/admin/config',{...proxyState.settings,apiKeys:keys});return proxyKeys();
   }
-  if(route==='usage'){await proxyRead();return proxyUsage(q);}
-  if(route==='usage/requests'){await proxyRead();return proxyLedger(q);}
-  if(route==='usage/quotas')return[];
-  if(route==='usage/quotas/history')return{};
-  if(route==='usage/heatmap'){await proxyRead();const rs=proxyRows(new URLSearchParams({...Object.fromEntries(q),period:'all'}));const ds=proxyGroups(rs,r=>proxyDate(new Date(r.startedAt))).sort((a,b)=>a.id.localeCompare(b.id));return{from:ds[0]?.id,to:ds.at(-1)?.id,days:ds.map(d=>({...d,date:d.id,tokens:d.input+d.output+d.cache_read+d.cache_write}))};}
   if(route==='settings')return proxyPrefs();
   if(route==='window/quit'){if(proxyDesktop())await proxyDesktop().Quit();else await proxyRequest('/admin/shutdown',{});return{};}
   // These original background readers concern removed Magpie modules.
   if(['upstream','lanes','drift','plugins/updates'].includes(route))return route==='lanes'?[]:{};
   throw Error('此操作不适用于 OpenCode Proxy：'+route);
 };
-copy=async function(value,label,button){try{if(proxyDesktop())await proxyDesktop().CopyText(value);else await navigator.clipboard.writeText(value);status((label||'内容')+'已复制','ok');}catch(e){status(e.message,'err');}};
+copy=async function(value,label,button){try{if(proxyDesktop())await proxyDesktop().CopyText(value);else await navigator.clipboard.writeText(value);flashCopied(button);status((label||'内容')+'已复制','ok');}catch(e){status(e.message,'err');}};
 // Actual original provider list, modal, model chips, search, bulk selection,
 // Names & levels, tests, keyboard and scroll-preserving renderers are retained.
 drawEditor=function(p){
@@ -88,7 +69,7 @@ function proxyModelParameters(m){
   if(model.temperature)numeric('Temperature','temperature',defaults.temperature,'供应商默认',v=>defaults.temperature=v);
   numeric('Top P','top_p',defaults.top_p,'供应商默认',v=>defaults.top_p=v);
   numeric('默认输出 Token','max_tokens',defaults.max_tokens,'不覆盖客户端',v=>defaults.max_tokens=v);
-  const label=el('label','wide','默认思考强度'),choice=el('button','sess-pick');label.append(choice);box.append(label);
+  const label=el('label','wide','默认思考强度'),choice=el('button','sess-pick');label.hidden=!model.reasoning;label.append(choice);box.append(label);
   const legacy=override.reasoningVariants||{},preset=structuredClone(patch.reasoningPreset??override.reasoningPreset??{type:'native'});let preserveLegacy=!override.reasoningPreset&&Object.keys(legacy).length>0;
   if(preserveLegacy&&model.reasoningAdapter==='effort'&&Object.entries(legacy).every(([k,v])=>Object.keys(v).length===1&&v.reasoningEffort===k)){preset.type='effort';preset.levels=Object.keys(legacy);preserveLegacy=false;}
   const allowed=()=>preset.type==='native'?model.nativeReasoningEfforts:[...new Set([...(model.nativeReasoningEfforts||[]),...(preset.levels||[])])];
@@ -110,21 +91,18 @@ if(!FLAVORS[flavor])flavor='openai';
 const proxyRenderGateway=renderGateway;
 renderGateway=function(){proxyRenderGateway();$('#gateway .sub').textContent=proxyModels.filter(m=>m.enabled).length+' 个模型 · 三种 API · 由全局 OpenCode 推理';const stop=el('button','text action',proxyState.running?'停止网关':'启动网关');stop.onclick=async()=>{stop.disabled=true;try{await proxyRequest(proxyState.running?'/admin/stop':'/admin/start',{});await proxyRead();renderGatewayView();}catch(e){status(e.message,'err');stop.disabled=false;}};$('#gateway .who').append(stop);};
 const proxyRenderConnect=renderConnect;
-renderConnect=function(){if(!providers)return;proxyRenderConnect();for(const e of $('#connect').querySelectorAll('.hint')){if(e.textContent.includes('provider/model'))e.textContent='使用下方纯模型名或别名。点击模型即可放入示例。';if(e.textContent.includes('magpie'))e.textContent=e.textContent.replaceAll('magpie','OpenCode Proxy');}};
-const proxyRenderActivity=renderActivity;
-renderActivity=function(){proxyRenderActivity();for(const c of providers.gateway.calls){const key=c.id;if(expandedCalls.has(key)&&!proxyDetails.has(c.id)){proxyDetails.set(c.id,{requestBody:'读取中…'});proxyRequest('/admin/request/'+c.id).then(d=>{const info={requestBody:JSON.stringify(d.requestedBody,null,2),responseBody:d.responsePreview||'',responseTruncated:d.responseTruncated};proxyDetails.set(c.id,info);Object.assign(c,info);if(view==='gateway')proxyRenderActivity();},e=>{proxyDetails.set(c.id,{requestBody:e.message});Object.assign(c,proxyDetails.get(c.id));proxyRenderActivity();});}}};
-ledLoadContent=async function(r){try{const d=await proxyRequest('/admin/request/'+r.id);return{found:true,raw:d};}catch(e){return{found:false,why:'read',error:e.message};}};
-const proxyContentBox=ledContentBox;
-ledContentBox=function(c){if(!c.raw)return proxyContentBox(c);const box=el('div','cx');box.append(callBodyPanel('Request Body',JSON.stringify(c.raw.requestedBody,null,2),false),callBodyPanel('生效请求',JSON.stringify(c.raw.effectiveBody,null,2),false),callBodyPanel('Response Body',c.raw.responsePreview||'',c.raw.responseTruncated,'details-'+c.raw.responseHeaders?.requestId));return box;};
+renderConnect=function(){if(!providers)return;proxyRenderConnect();$('#connectNote').textContent='所有请求需要启用的 Key';for(const e of $('#connect').querySelectorAll('.hint')){if(e.textContent.includes('provider/model'))e.textContent='使用下方纯模型名或别名。点击模型即可放入示例。';if(e.textContent.includes('magpie'))e.textContent=e.textContent.replaceAll('magpie','OpenCode Proxy');}};
+renderActivity=()=>{};
 loadQuotas=async()=>{quotas=[];};
 renderArchive=()=>{};
 loadCLIs=loadInstalls=cliBehindOnce=whatsNewOnce=renderUpdateBadge=loadUpstream=refreshLanes=async()=>{};
 markUpstream=renderMovable=renderExcluded=renderProviderDiscovery=discoverLocalProviders=renderAgents=renderAgentsLoading=()=>{};
 setGatewayMode=()=>{};
-load=async function(){try{if(view==='gateway'||view==='providers'&&!editing)await magpieLoadProviders();else if(view==='usage')await refreshUsage();else if(view==='settings')await loadSettings();applyPrefs(proxyPrefs());}catch(e){status(e.message,'err');}};
+load=async function(){try{if(view==='gateway'||view==='providers'&&!editing)await magpieLoadProviders();else if(view==='settings')await loadSettings();applyPrefs(proxyPrefs());}catch(e){status(e.message,'err');}};
 loadProviders=magpieLoadProviders;
 loadSettings=async function(){await proxyRead();prefs=proxyPrefs();renderSettings();};
 renderSettings=function(){
+  $('#setQ').hidden=true;
   const page=$('#view-settings');page.querySelectorAll('.set-page').forEach(p=>p.hidden=true);let host=$('#setPage-general');host.hidden=false;host.replaceChildren();const tabs=$('#setTabs');tabs.replaceChildren();
   for(const [id,name] of [['general','常规'],['opencode','OpenCode'],['network','网络'],['about','关于']]){const b=el('button',setShown===id?'on':'',name);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(setShown===id));b.onclick=()=>{setShown=id;renderSettings();syncURL();};tabs.append(b);}if(!['general','opencode','network','about'].includes(setShown)){setShown='general';return renderSettings();}
   const list=el('div','list prefs');host.append(list);
@@ -139,6 +117,7 @@ renderSettings=function(){
   }
   if(setShown==='opencode'){
     const command=edit('OpenCode 程序','默认自动查找全局安装；不限制版本。','command');if(Array.isArray(proxyState.settings.command)){command.i.value=proxyState.settings.command.join(' ');if(proxyState.settings.command.length>1){command.i.disabled=true;command.r.querySelector('button').disabled=true;command.r.querySelector('.sub').textContent='当前为多参数命令；保留原配置。';}}
+    const executable=el('button','text action','选择程序');executable.disabled=!proxyDesktop()||command.i.disabled;executable.onclick=async()=>{const value=await proxyDesktop().SelectExecutable();if(value)command.i.value=value;};command.r.append(executable);
     const dir=edit('工作目录','留空使用默认目录；读取该目录和全局 OpenCode 配置。','workingDirectory');const browse=el('button','text action','选择目录');browse.disabled=!proxyDesktop();browse.onclick=async()=>{const value=await proxyDesktop().SelectDirectory();if(value)dir.i.value=value;};dir.r.append(browse);
     edit('启动超时（毫秒）','OpenCode 启动并准备就绪的等待时间。','startupTimeoutMs',true);
     edit('首输出超时（毫秒）','等待真实模型首输出的时间；0 为不限。','firstOutputTimeoutMs',true);
@@ -147,20 +126,23 @@ renderSettings=function(){
     row('工作进程复用','空闲 OpenCode 工作进程可复用；不限制请求并发。',segs([[false,'关闭'],[true,'开启']],proxyState.settings.workerReuse,v=>saveSetting({workerReuse:v}).catch(e=>status(e.message,'err'))));
   }
   if(setShown==='network'){edit('监听地址','127.0.0.1 为本机；0.0.0.0 允许局域网通过访问 Key 连接。','host');edit('API 端口','三种协议共用该端口。','port',true);edit('并发上限','0 为不限；默认不限并发。','maxConcurrent',true);}
-  if(setShown==='about'){row('OpenCode Proxy','0.6.0 · 独立 OpenCode 反向代理',el('span','mono','Windows / Linux'));row('配置文件',proxyState.configFile,el('span',''));row('前端来源','在 Magpie 原始前端上修改精简；保留其 MIT 许可证。',el('span','mono','210234a5'));row('请求记录','保留完整提示词、工具参数、请求及响应；最近 250 条。',el('span',''));}
+  if(setShown==='about'){row('OpenCode Proxy','0.7.0 · 独立 OpenCode 反向代理',el('span','mono','Windows / Linux'));row('配置文件',proxyState.configFile,el('span',''));row('前端来源','在 Magpie 原始前端上修改精简；保留其 MIT 许可证。',el('span','mono','a75de4c2'));}
 };
 // Remove unrelated original pages after their initialization has finished.
-for(const id of ['agents','routing','sessions','library','plugins']){$('#view-'+id)?.remove();$(`#nav button[data-view="${id}"]`)?.remove();}
+for(const id of ['agents','routing','sessions','library','plugins','usage']){$('#view-'+id)?.remove();$(`#nav button[data-view="${id}"]`)?.remove();}
 $('.brand').lastElementChild.textContent='OpenCode Proxy';
 $('#prefs').title='设置';
-$('#ledExport').onclick=()=>{const rows=proxyRows(new URLSearchParams(ledParams())).map(proxyRow);const keys=['t','agent','req','providerName','status','ms','ttft_ms','in','out','cache_read','cache_write','reasoning'];const csv='\uFEFF'+[keys,...rows.map(r=>keys.map(k=>r[k]??''))].map(row=>row.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'})),a=el('a');a.href=url;a.download='opencode-proxy-requests.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('#addProvider')?.parentElement.remove();
+$('#activity')?.previousElementSibling.remove();$('#activity')?.remove();
+$('#nav').querySelectorAll('.nav-gl').forEach(e=>e.remove());
+const modelNav=$('#nav button[data-view="providers"] span[data-t]');modelNav.dataset.en='Models';modelNav.textContent=t('Models');
+$('#sync').dataset.enTitle='Refresh models';$('#sync').title='刷新全局 OpenCode 模型';
+// Use the upstream sidebar/title layout after removing unrelated navigation.
+layoutNav();
+const proxyShow=show;show=async function(v){return proxyShow(['providers','gateway','settings'].includes(v)?v:'gateway');};
 gatewayLimitBadge=()=>el('span','');gatewayModelsBadge=()=>el('span','');
-const originalLedger=renderLedger;renderLedger=function(){originalLedger();$('#ledVia').hidden=true;$('#ledQ').placeholder='搜索模型、供应商、客户端或请求 ID';$('#ledNote').textContent='请求明细保留最近 250 条；累计用量见“概览”。Token、首字和输出速度采用 Magpie 的统计计算。';};
-const originalUsage=renderUsage;renderUsage=function(){originalUsage();for(const id of ['usageAgents','usageModels']){const node=$('#'+id);if(!node.childElementCount){node.hidden=true;if(node.previousElementSibling?.classList.contains('row-head'))node.previousElementSibling.hidden=true;}}};
-const originalUsageEvery=renderUsageEvery;renderUsageEvery=function(...args){originalUsageEvery(...args);$('#usageReload').title='刷新网关用量与请求记录';};
-for(const [id,text] of [['usageScope','累计网关请求与 Token 统计持久化；费用和订阅剩余额度未提供。'],['ledScope','最近 250 条网关请求明细（包含失败和本地拒绝）；筛选与 CSV 作用于保留的明细。']]){const e=$('#'+id);e.dataset.en=text;e.textContent=text;}
 const proxyApplyPrefs=applyPrefs;applyPrefs=function(...args){const changed=proxyApplyPrefs(...args);document.documentElement.style.setProperty('--zoom',proxyPrefs().textSize/100);return changed;};
 if(['general','opencode','network','about'].includes(params.get('tab')))setShown=params.get('tab');
 view='gateway';
-(async()=>{try{await proxyRead(true);applyPrefs(proxyPrefs());connectKeyID=proxyState.settings.apiKeys.find(k=>k.enabled)?.id||'';await loadGatewayKeys();show(['providers','gateway','usage','settings'].includes(params.get('view'))?params.get('view'):'gateway');await load();}catch(e){status(e.message,'err');}})();
+(async()=>{try{await proxyRead(true);applyPrefs(proxyPrefs());connectKeyID=proxyState.settings.apiKeys.find(k=>k.enabled)?.id||'';await loadGatewayKeys();show(['providers','gateway','settings'].includes(params.get('view'))?params.get('view'):'gateway');await load();}catch(e){status(e.message,'err');}})();
 setInterval(()=>{if(!document.hidden&&(view==='gateway'||view==='providers'&&!editing))load();},3000);

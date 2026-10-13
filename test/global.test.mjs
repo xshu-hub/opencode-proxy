@@ -819,7 +819,7 @@ test('reuse13: a slow downstream reader does not idle-timeout an upstream that h
   } finally {auditStream.release.resolve();await instance.close();}
 });
 
-test('managed20: packaged server uses real global OpenCode, aliases, defaults and full request logs with persistent statistics', {timeout:90000}, async t=>{
+test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{
   if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate the packaged server.');return;}
   const file=path.join(home,'managed-config.json');
   await writeFile(file,JSON.stringify({mode:'global',command,workingDirectory,host:'127.0.0.1',port:0,timeoutMs:0,workerReuse:true,diagnostics:false,apiKeys:[{id:'managed-key',name:'测试客户端',key:'fixture-client-access-key',enabled:true}],modelOverrides:{'fixture-api/mock':{alias:'desktop-model',defaults:{temperature:0.4,max_tokens:100}}}}));
@@ -844,11 +844,10 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     const body={model:'desktop-model',messages:[{role:'system',content:'CLIENT_FULL_PROMPT_SENTINEL'},{role:'user',content:'Call tools'}],stream:true,tools};
     const response=await fetch(state.endpoint+'/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});
     assert.equal(response.status,200);const text=await response.text();assert.match(text,/tool_calls/);assert.match(text,/北京/);
-    const final=await(await admin('/admin/state')).json();assert.equal(final.statistics.totals.requests,1);assert.equal(final.statistics.totals.outputTokens,5);
-    const row=final.statistics.rows[0];assert.ok(row.ttftMs>0);assert.equal(row.usage.completion_tokens,5);assert.equal(row.target,'fixture-api/mock');
-    const detail=await(await admin('/admin/request/'+row.id)).json();assert.deepEqual(detail.requestedBody,body);assert.equal(detail.effectiveBody.temperature,0.4);assert.equal(detail.effectiveBody.max_tokens,100);assert.match(detail.responsePreview,/tool_calls/);assert.equal(JSON.stringify(detail).includes('fixture-client-access-key'),false);
+    const final=await(await admin('/admin/state')).json();assert.equal('statistics' in final,false);
     assert.equal(requests.at(-1).body.temperature,0.4);assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
-    assert.equal((await readFile(path.join(home,'statistics.json'),'utf8')).includes('CLIENT_FULL_PROMPT_SENTINEL'),false);
+    assert.equal(await readFile(path.join(home,'statistics.json'),'utf8').catch(()=>null),null);
+    assert.equal((await admin('/admin/request/removed')).status,404);
     for(const protocol of ['responses','anthropic']){
       const externalTools=tools.map(t=>protocol==='responses'?{type:'function',...t.function}:{name:t.function.name,input_schema:t.function.parameters});
       const firstBody={model:'desktop-model',stream:true,tools:externalTools,...(protocol==='responses'?{input:'Call tools',instructions:'PROTOCOL_SYSTEM_SENTINEL',store:false}:{max_tokens:100,system:'PROTOCOL_SYSTEM_SENTINEL',messages:[{role:'user',content:'Call tools'}]})};
@@ -865,7 +864,6 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
         continuation={model:'desktop-model',max_tokens:100,tools:externalTools,system:'PROTOCOL_SYSTEM_SENTINEL',messages:[{role:'user',content:'Call tools'},{role:'assistant',content:calls},{role:'user',content:calls.toReversed().map(c=>({type:'tool_result',tool_use_id:c.id,content:'sunny'}))}]};
       }
       const next=await fetch(state.endpoint+route,{method:'POST',headers,body:JSON.stringify(continuation)});assert.equal(next.status,200);const answer=await next.json();assert.match(JSON.stringify(answer),/全局 OpenCode/);assert.equal(requests.at(-1).body.messages.filter(m=>m.role==='tool').length,2);assert.ok(requests.at(-1).body.messages.some(m=>m.role==='system'&&m.content.includes('PROTOCOL_SYSTEM_SENTINEL')));
-      const now=await(await admin('/admin/state')).json();assert.equal(now.statistics.rows[0].protocol,protocol);const stored=await(await admin('/admin/request/'+now.statistics.rows[0].id)).json();assert.deepEqual(stored.requestedBody,continuation);assert.equal(stored.effectiveBody.messages.at(-1).role,'tool');assert.equal(JSON.stringify(stored).includes('fixture-client-access-key'),false);
     }
     const preference=await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{defaults:{reasoning_effort:'high'}}});assert.equal(preference.status,200);
     const sendEffort=async effort=>{const body={model:'native-variants',messages:[{role:'user',content:'Hello'}],...(effort?{reasoning_effort:effort}:{})};const reply=await fetch(state.endpoint+'/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,200,await(reply.status===200?Promise.resolve(''):reply.text()));await reply.text();};
@@ -881,6 +879,6 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     for(const [route,body] of [['chat/completions',{model:'desktop-model',messages:[{role:'user',content:'blocked'}]}],['responses',{model:'fixture-api/mock',input:'blocked'}],['messages',{model:'desktop-model',max_tokens:100,messages:[{role:'user',content:'blocked'}]}]]){const reply=await fetch(state.endpoint+'/'+route,{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,403);await reply.text();}
     assert.equal(requests.length,callsBefore,'Disabled model requests never reach OpenCode inference');
     const selectedPreset={type:'effort',levels:['high','max']};assert.equal((await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{reasoningPreset:selectedPreset,reasoningVariants:null,defaults:{reasoning_effort:'max'}}})).status,200);await sendEffort();assert.equal(requests.at(-1).body.reasoning_effort,'max');
-    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,14);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'max');assert.deepEqual(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningPreset,selectedPreset);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningVariants,undefined);assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
+    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal('statistics' in restarted,false);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'max');assert.deepEqual(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningPreset,selectedPreset);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningVariants,undefined);assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
   }finally{await stop();}
 });

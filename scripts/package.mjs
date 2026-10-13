@@ -1,10 +1,13 @@
-import {mkdir,cp,writeFile,readFile,readdir} from 'node:fs/promises';
+import {mkdir,cp,writeFile,readFile,readdir,rm} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 const platform=process.argv[2]??(process.platform==='win32'?'windows':'linux');
 if(!['windows','linux'].includes(platform))throw new Error('Unknown package platform.');
 const dist=path.resolve('dist',platform);
+// Only the fixed, build-owned target; remove stale resources from older builds.
+if(path.dirname(dist)!==path.resolve('dist'))throw new Error('Invalid package output.');
+await rm(dist,{recursive:true,force:true});
 await mkdir(path.join(dist,'resources','ui'),{recursive:true});
 await cp('frontend/dist',path.join(dist,'resources','ui'),{recursive:true});
 await cp('lib',path.join(dist,'resources'),{recursive:true});
@@ -16,6 +19,7 @@ const binary=path.join(dist,platform==='windows'?'opencode-proxy-server.exe':'op
 const compiled=spawnSync(bun,['build','bin/serve.mjs','--compile','--target=bun-'+platform+'-x64','--outfile',binary],{stdio:'inherit',windowsHide:true});
 if(compiled.status!==0)throw new Error('Server executable build failed.');
 if(platform==='windows'){
+  await rm(path.resolve('desktop/ui'),{recursive:true,force:true});
   await mkdir('desktop/ui',{recursive:true});await cp('frontend/dist','desktop/ui',{recursive:true});
   const go=process.env.GO_EXECUTABLE??'go';
   const build=spawnSync(go,['build','-mod=mod','-tags','production','-trimpath','-ldflags','-s -w -H windowsgui','-o',path.join(dist,'opencode-proxy.exe'),'.'],{cwd:'desktop',stdio:'inherit',windowsHide:true,env:{...process.env,CGO_ENABLED:'0'}});
