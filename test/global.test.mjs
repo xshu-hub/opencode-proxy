@@ -846,6 +846,24 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     const detail=await(await admin('/admin/request/'+row.id)).json();assert.deepEqual(detail.requestedBody,body);assert.equal(detail.effectiveBody.temperature,0.4);assert.equal(detail.effectiveBody.max_tokens,100);assert.match(detail.responsePreview,/tool_calls/);assert.equal(JSON.stringify(detail).includes('fixture-client-access-key'),false);
     assert.equal(requests.at(-1).body.temperature,0.4);assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
     assert.equal((await readFile(path.join(home,'statistics.json'),'utf8')).includes('CLIENT_FULL_PROMPT_SENTINEL'),false);
-    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,1);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].alias,'desktop-model');
+    for(const protocol of ['responses','anthropic']){
+      const externalTools=tools.map(t=>protocol==='responses'?{type:'function',...t.function}:{name:t.function.name,input_schema:t.function.parameters});
+      const firstBody={model:'desktop-model',stream:true,tools:externalTools,...(protocol==='responses'?{input:'Call tools',instructions:'PROTOCOL_SYSTEM_SENTINEL',store:false}:{max_tokens:100,system:'PROTOCOL_SYSTEM_SENTINEL',messages:[{role:'user',content:'Call tools'}]})};
+      const route=protocol==='responses'?'/responses':'/messages';
+      const headers={'content-type':'application/json',...(protocol==='responses'?{authorization:'Bearer fixture-client-access-key'}:{'x-api-key':'fixture-client-access-key','anthropic-version':'2023-06-01'})};
+      const reply=await fetch(state.endpoint+route,{method:'POST',headers,body:JSON.stringify(firstBody)});assert.equal(reply.status,200,await(reply.status===200?Promise.resolve(''):reply.text()));
+      const events=await Array.fromAsync(sseEvents(reply.body));assert.equal(events.some(e=>e.type==='error'),false,JSON.stringify(events));
+      let continuation;
+      if(protocol==='responses'){
+        const completed=events.at(-1);assert.equal(completed.type,'response.completed');const calls=completed.response.output.filter(i=>i.type==='function_call');assert.equal(calls.length,2);assert.equal(JSON.parse(calls[0].arguments).city,'北京');
+        continuation={model:'desktop-model',tools:externalTools,store:false,instructions:'PROTOCOL_SYSTEM_SENTINEL',input:[{role:'user',content:'Call tools'},...completed.response.output,...calls.toReversed().map(c=>({type:'function_call_output',call_id:c.call_id,output:'sunny'}))]};
+      }else{
+        assert.equal(events.at(-1).type,'message_stop');const calls=events.filter(e=>e.type==='content_block_start'&&e.content_block.type==='tool_use').map(e=>({...e.content_block,input:JSON.parse(events.filter(d=>d.index===e.index&&d.type==='content_block_delta').map(d=>d.delta.partial_json??'').join(''))}));assert.equal(calls.length,2);assert.equal(calls[0].input.city,'北京');
+        continuation={model:'desktop-model',max_tokens:100,tools:externalTools,system:'PROTOCOL_SYSTEM_SENTINEL',messages:[{role:'user',content:'Call tools'},{role:'assistant',content:calls},{role:'user',content:calls.toReversed().map(c=>({type:'tool_result',tool_use_id:c.id,content:'sunny'}))}]};
+      }
+      const next=await fetch(state.endpoint+route,{method:'POST',headers,body:JSON.stringify(continuation)});assert.equal(next.status,200);const answer=await next.json();assert.match(JSON.stringify(answer),/全局 OpenCode/);assert.equal(requests.at(-1).body.messages.filter(m=>m.role==='tool').length,2);assert.ok(requests.at(-1).body.messages.some(m=>m.role==='system'&&m.content.includes('PROTOCOL_SYSTEM_SENTINEL')));
+      const now=await(await admin('/admin/state')).json();assert.equal(now.statistics.rows[0].protocol,protocol);const stored=await(await admin('/admin/request/'+now.statistics.rows[0].id)).json();assert.deepEqual(stored.requestedBody,continuation);assert.equal(stored.effectiveBody.messages.at(-1).role,'tool');assert.equal(JSON.stringify(stored).includes('fixture-client-access-key'),false);
+    }
+    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,5);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].alias,'desktop-model');
   }finally{await stop();}
 });

@@ -86,7 +86,7 @@ test('preserve role history and associate reversed parallel tool results by id',
   assert.throws(() => validateRequest({ ...request, messages: [...request.messages, request.messages.at(-1)] }, models));
 });
 test('cache and reasoning tokens map to OpenAI totals', () => {
-  assert.deepEqual(usageOf({ input: 10, output: 3, reasoning: 2, cache: { read: 7, write: 5 } }), { prompt_tokens: 22, completion_tokens: 5, total_tokens: 27, prompt_tokens_details: { cached_tokens: 7 }, completion_tokens_details: { reasoning_tokens: 2 } });
+  assert.deepEqual(usageOf({ input: 10, output: 3, reasoning: 2, cache: { read: 7, write: 5 } }), { prompt_tokens: 22, completion_tokens: 5, total_tokens: 27, prompt_tokens_details: { cached_tokens: 7, cache_write_tokens: 5 }, completion_tokens_details: { reasoning_tokens: 2 } });
 });
 test('Cherry Studio assistant reasoning_content is valid history, with reasoning kept separate from visible text', () => {
   for (const reasoning of ['', null, 'PRIOR_REASONING_SENTINEL']) {

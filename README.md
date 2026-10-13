@@ -1,5 +1,7 @@
 # OpenCode Proxy
 
+对外提供 **OpenAI Chat Completions、OpenAI Responses、Anthropic Messages** 三种协议，共用模型、别名、访问 Key、日志和统计；请求均经过真实全局 OpenCode。支持范围与原生协议的差异见 [协议说明](docs/protocols.md)。
+
 独立的 OpenCode 反代工具，带 Windows EXE 客户端和 Linux 服务端。
 客户端 → OpenCode Proxy → 真实全局 OpenCode → 已配置的上游供应商。
 
