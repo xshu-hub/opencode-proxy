@@ -39,5 +39,6 @@ let html=(await readFile(path.join(source,'index.html'),'utf8')).replace('<title
 html=html.replace('<link rel="stylesheet" href="routing.css">','').replace(/<link rel="stylesheet" href="(?:plugins|sessions|context)\.css">/g,'');
 html=html.replace(/<script src="(?:routing|library|plugins|sessions|context)\.js"><\/script>/g,'');
 html=html.replace('</head>','<link rel="stylesheet" href="proxy.css">\n</head>').replace('</body>','<script src="proxy-adapter.js"></script>\n</body>');
+html=html.replace('Create a gateway key for each client. Usage is counted separately for each key.','为不同客户端配置独立访问密钥。所有接口均需提供已启用的 Key。').replace('Daily usage over the last 53 weeks','最近保留请求的每日用量');
 await writeFile('frontend/index.html',html);
 await writeFile(path.join(dest,'SOURCE.json'),JSON.stringify({repository:'https://github.com/yetone/magpie',commit:'210234a5f33e0f2643f82b4337e249cf0fe81371',license:'MIT',files:hashes,base:'Full index.html, app.js, i18n.js, caller-keys.js and styles; renderer overrides live in proxy-adapter.js. Non-proxy views are pruned after original event initialization.',patches:'See scripts/vendor-magpie.mjs; checked substitutions preserve original provider/model/gateway/usage/ledger/modal/menu rendering.'},null,2)+'\n');

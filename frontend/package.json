@@ -5,8 +5,5 @@
   "type": "module",
   "scripts": {
     "build": "node ../scripts/build-ui.mjs"
-  },
-  "dependencies": {
-    "@xshu-hub/opencode-proxy": "file:.."
   }
 }

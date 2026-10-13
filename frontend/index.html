@@ -105,7 +105,7 @@
   </div>
   <section id="gatewayKeysBlock" hidden>
     <div class="row-head"><span class="label" data-t>Gateway keys</span><span class="grow"></span><button class="text" id="addGatewayKey" data-t>Add gateway key</button></div>
-    <p class="usage-note" data-t>Create a gateway key for each client. Usage is counted separately for each key.</p>
+    <p class="usage-note" data-t>为不同客户端配置独立访问密钥。所有接口均需提供已启用的 Key。</p>
     <section id="gatewayKeys"></section>
   </section>
   <div class="row-head"><button class="fold" id="foldConnect" aria-expanded="true" aria-controls="connect"><span class="label" data-t>Connect</span></button><span class="grow"></span><span class="note" id="connectNote"></span></div>
@@ -190,7 +190,7 @@
     </div>
     <section class="led-heat" id="ledHeat" hidden>
       <div class="led-bar">
-        <div class="heat-title"><b data-t>Usage heatmap</b><span data-t>Daily usage over the last 53 weeks</span></div>
+        <div class="heat-title"><b data-t>Usage heatmap</b><span data-t>最近保留请求的每日用量</span></div>
         <span class="grow"></span>
         <div class="segs" id="ledHeatMetric"></div>
       </div>
