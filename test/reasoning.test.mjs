@@ -2,6 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyReasoning, publicReasoning } from '../lib/reasoning.mjs';
 
+test('public effort levels follow Magpie slider order even when native variants are declared in reverse',()=>{
+  const model={api:{npm:'custom-native-sdk'},variants:{max:{level:4},high:{level:3},low:{level:1},medium:{level:2},none:{level:0}},options:{reasoningEffort:'medium'}};
+  assert.deepEqual(publicReasoning(model),{reasoning:true,reasoningEfforts:['none','low','medium','high','max'],nativeReasoningEffort:'medium'});
+});
+
 test('reasoning preserves defaults when omitted and explicit SDK effort overrides without changing shared options', () => {
   const options = { reasoningEffort: 'xhigh', nested: { keep: true } };
   const model = { api: { npm: '@ai-sdk/openai-compatible' } };
