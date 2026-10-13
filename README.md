@@ -85,6 +85,6 @@ npm run package:windows  # 需要 Go 和 Bun
 npm run package:linux   # 需要 Bun
 ```
 
-Windows 桌面使用 Wails 2 + Go + WebView2，界面为 Vue 3 + TypeScript + Vite + Naive UI。服务核心继续使用已有 JavaScript，通过 Bun 打包。只有 OpenCode 原生 worker 的脚本资源会作为文件交给 OpenCode 加载。
+Windows 桌面使用 Wails 2 + Go + WebView2，界面直接复用并精简 Magpie 的 HTML、CSS、JavaScript，通过 Vite 打包。服务核心继续使用已有 JavaScript，通过 Bun 打包。只有 OpenCode 原生 worker 的脚本资源会作为文件交给 OpenCode 加载。
 
-GitHub 默认构建 Windows 和 Linux 产物，执行快速测试、前端类型检查，并使用真实 OpenCode 1.18.35 与本地模拟供应商验证打包后的服务、别名/参数、工具流、完整日志与重启统计。手动 compatibility 才运行另外四组合完整测试。不会构建 Magpie，也不会在 CI 调用生产账号。
+GitHub 默认构建 Windows 和 Linux 产物，执行快速测试、前端 JavaScript 语法检查，并使用真实 OpenCode 1.18.35 与本地模拟供应商验证打包后的服务、别名/参数、工具流、完整日志与重启统计。手动 compatibility 才运行另外四组合完整测试。不会构建 Magpie，也不会在 CI 调用生产账号。
