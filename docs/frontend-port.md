@@ -1,19 +1,19 @@
-# Magpie 前端精简版（0.7.0）
+# 独立前端（0.8.0）
 
-前端同步至 Magpie `a75de4c21ac28be98af8334643077d8b0bf47df7`，直接使用其 HTML、CSS、JavaScript、侧边栏、模型编辑器、连接示例、Key 管理和菜单源码。通过 `scripts/vendor-magpie.mjs` 中的校验替换与 `proxy-adapter.js` 适配独立 OpenCode 后端。
+界面已完全重写，不再使用 Magpie 前端代码或资源。GitHub 设计检索参考 [Tabler](https://github.com/tabler/tabler) 的侧边栏与表格、[Flowbite Admin Dashboard](https://github.com/themesberg/flowbite-admin-dashboard) 的表单与卡片层次；未引入其框架、模板、素材或依赖。
 
-仅保留“模型”和“网关”两个主页面。设置入口保留工作目录、OpenCode 程序、超时、监听地址/端口、外观与托盘运行。模型页沿用模型芯片、搜索、全选、名称与推理档位、测试、取消及保存交互，补充默认参数、原生/自定义思考档位。保存通过 `/admin/models/batch` 原子校验；无效配置不会部分保存，活动请求继续使用旧配置。
+技术栈：原生 JavaScript ES Modules、CSS、SVG、系统字体。没有 React/Vue、Electron、外部 CDN、字体下载或前端运行时依赖。scripts/build-ui.mjs 检查模块语法并只复制 frontend/src 与 index.html；客户端、Linux 和浏览器使用同一套资源。Windows 宿主仍为 Wails 2 + Go + WebView2。
 
-网关页保留启动/停止/重启、三种协议连接示例、模型列表、访问 Key 的创建/自定义值/重命名/启停/复制/轮换/移除。每个 API 请求必须提供启用的 Key。未实现的预算与按 Key 限制模型按钮不展示。
+导航直接列出模型、网关、OpenCode、网络与超时、外观与运行，没有底部设置入口或关于页。宽窗口使用侧边栏；窄窗口将这些项目排列为可滚动的顶栏。
 
-已移除统计页、最近调用、详情 API、统计模块和请求存储模块。新请求不再写 statistics.json 或 requests 目录，也不复制完整请求/响应到日志；已有记录文件不删除、不加载。客户端响应中的真实 usage 仍正常转发。原 Magpie 单文件脚本中部分未调用的函数和初始化锚点仍保留，初始化后裁掉无关 DOM；没有运行其统计后端、插件、Agent 扫描或供应商代理。后续源码瘦身应与现有交互回归分开验收。
+- 模型：搜索与供应商/启用状态筛选，30 条分页，按原始 target 记录多选和批量启停。右侧配置面板保留别名、上下文/输出上限、默认参数、默认思考强度、原生/自定义思考档位和预算。已有高级映射在没有主动改变档位时保留；恢复默认会明确提示。模型测试支持三种协议。
+- 网关：启停/重启、三种协议地址、curl/Python 流式示例、PowerShell 环境变量；按当前启用模型及 Key 生成。Key 创建/自定义值/重命名/启停/复制/轮换/移除。
+- OpenCode：全局程序、参数（每行一个）、工作目录，桌面提供路径选择按钮；多参数配置不再变成不可编辑的单行命令。
+- 网络与超时：监听地址/端口、默认不限并发、按秒填写超时、复用和空闲工作进程设置。
+- 外观与运行：系统/浅色/深色、文字大小、隐藏到托盘、退出服务。
 
-Windows 为 Wails 2 + Go + 系统 WebView2，无 Electron；Linux 为独立服务和相同浏览器管理界面。关闭 Windows 窗口隐藏到托盘；退出才停止服务。只构建本工具。
+api.js 统一适配 Wails 绑定和本机管理 API。全配置保存串行读取最新状态，避免跨页面修改覆盖 Key 或目录设置。后台仅更新网关状态，不重建表单或打断输入。用户输入使用 textContent；示例的 shell 字符串分别转义。Key 在示例中显示供客户端连接，不写入日志。
 
-```sh
-node scripts/vendor-magpie.mjs ../magpie-front-latest
-npm run build:ui
-npm test
-```
+统计和请求持久化保持移除。网关推理、全局认证、工具桥接、三种协议、流式转发仍使用原后端；用户配置格式兼容 0.7.0。前端变更不修改全局 OpenCode。
 
-参考目录必须是对应 commit 的 internal/gui/assets。来源和 SHA-256 记录在 `frontend/public/SOURCE.json`，保留 MIT 版权。升级上游时替换不匹配会终止导入，须核对生成脚本。
+模块：ui.js 为 DOM/对话框控件，model-data.js 负责参数与旧映射转换，model-form.js 管理配置面板，app.js 管理页面及调用。frontend.test.mjs 覆盖参数边界、旧映射保留、思考级别与预算、搜索身份；还需浏览器检查表单、键盘、深浅色和响应布局。

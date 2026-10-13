@@ -2,15 +2,17 @@
 
 独立 OpenCode 反向代理。推理经过真实全局 OpenCode，复用其供应商配置、登录与认证插件，不修改 OpenCode。对外提供 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages，支持流式文本与客户端函数工具。
 
-0.7.0 同步并精简 Magpie 最新前端（`a75de4c2`）：仅保留模型和网关，移除统计及请求记录。Windows 使用 Wails 2 + Go + WebView2；Linux 使用独立服务和浏览器界面。没有 Electron，成品运行无需 Node.js 或 Bun。
+0.8.0 使用重新设计的独立前端：原生 ES Modules + CSS，零运行时框架依赖。模型、网关、OpenCode、网络与超时、外观与运行直接排列在主导航中，没有底部设置或关于页面。Windows 使用 Wails 2 + Go + WebView2；Linux 使用独立服务和浏览器界面。没有 Electron，成品运行无需 Node.js 或 Bun。
 
 ## Windows
 
-完整解压，运行 `opencode-proxy.exe`，保留同目录 `opencode-proxy-server.exe` 和 resources。全局 opencode 应在当前用户 PATH 中可用；必要时在设置 → OpenCode 指定程序和工作目录。
+完整解压，运行 `opencode-proxy.exe`，保留同目录 `opencode-proxy-server.exe` 和 resources。全局 opencode 应在当前用户 PATH 中可用；必要时在主导航的 OpenCode 页面指定程序、启动参数和工作目录。
 
-- **模型**：点击供应商行编辑；模型芯片控制启用。“名称与推理档位”设置纯名称/别名、上下文/输出上限、默认 Temperature / Top P / 输出 Token、默认思考强度、原生或自定义可选档位，修改后保存。
+- **模型**：搜索、供应商/状态筛选、分页、单独或批量启停；点击“配置”打开右侧面板，设置纯名称/别名、上下文/输出上限、默认 Temperature / Top P / 输出 Token、默认思考强度和自定义可选档位。测试对话框可选择三种协议。
 - **网关**：启动、停止、重启，选择三种协议查看连接地址与示例；创建、复制、启停、重命名或轮换访问 Key。
-- **设置**：OpenCode、工作目录、超时、监听地址和端口、外观、后台运行。
+- **OpenCode**：全局程序、启动参数、工作目录，客户端支持文件/目录选择。
+- **网络与超时**：监听地址、端口、并发、超时和空闲工作进程配置。超时按秒填写。
+- **外观与运行**：跟随系统/浅色/深色、文字大小、托盘和退出。
 
 参数留空跟随 OpenCode，客户端显式参数优先。上限不能超过 OpenCode 报告的值，别名不能冲突。自定义思考档位仍需上游 SDK 与模型支持；未知 SDK 保留原生档位。
 
@@ -56,4 +58,4 @@ npm run package:windows  # Go + Bun
 npm run package:linux    # Bun
 ```
 
-GitHub 构建 Windows/Linux，检查前端语法、单元测试、Windows 托盘，以及真实 OpenCode 1.18.35 + 本地模拟供应商的打包后集成测试。不调用生产账号，不构建 Magpie。前端来源见 [移植说明](docs/frontend-port.md)，保留 Magpie MIT 许可证。
+GitHub 构建 Windows/Linux，检查前端语法、单元测试、Windows 托盘，以及真实 OpenCode 1.18.35 + 本地模拟供应商的打包后集成测试。不调用生产账号，不构建 Magpie。[前端说明](docs/frontend-port.md)记录设计参考与结构；桥接核心继续保留原 Magpie MIT 版权声明。
