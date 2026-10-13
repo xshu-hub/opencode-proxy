@@ -5,3 +5,7 @@
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition-duration:0s!important;animation-duration:0s!important}}
 
 .reasoning-custom{padding:12px 0;border-top:1px solid var(--line)}.reasoning-custom summary{cursor:pointer;font-weight:600}.reasoning-custom textarea{width:100%;box-sizing:border-box;font:12px/1.6 ui-monospace,monospace;resize:vertical;border:1px solid var(--line);border-radius:7px;padding:10px;background:var(--card);color:var(--fg)}.custom-presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.desktop-controls{display:flex;align-items:center;gap:12px;padding:12px 16px}.desktop-controls p{margin:6px 0 0}
+
+.effort-choices{display:flex;flex-wrap:wrap;gap:4px;max-width:440px}.thinking-levels{display:grid;gap:8px;margin-top:12px}.thinking-level{display:flex;align-items:center;gap:10px;font-size:12px}.thinking-level>span{min-width:100px}.thinking-level input[type=number]{width:110px}.model-error{color:var(--red);font-size:12px;line-height:1.6}.reasoning-custom>.segs{margin-top:12px}
+
+.argument-row{display:flex;gap:8px;margin:5px 0}.argument-row input{flex:1}.argument-row button{flex:none}

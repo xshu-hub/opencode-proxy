@@ -13,7 +13,7 @@ import {Telemetry} from '../lib/telemetry.mjs';
 
 const config=()=>({mode:'global',host:'127.0.0.1',port:0,diagnostics:false,apiKeys:[{id:'test',name:'测试客户端',key:'fixture-access-key',enabled:true}],modelOverrides:{}});
 class Bridge{
-  constructor(config){this.config=config;this.config.models={mock:{model:'fixture/mock',name:'模型',context:100000,output:1000,reasoning:true,reasoningEfforts:['low','high']}};this.acceptedModels={'fixture/mock':this.config.models.mock,...this.config.models};}
+  constructor(config){this.config=config;this.config.models={mock:{model:'fixture/mock',name:'模型',context:100000,output:1000,reasoning:true,reasoningEfforts:['low','high'],reasoningAdapter:'effort'}};this.acceptedModels={'fixture/mock':this.config.models.mock,...this.config.models};}
   async loadModels(){return this.config.models;}
   async close(){this.closed=true;}
   async fetch(_url,init){const body=JSON.parse(init.body);this.body=body;this.config.onDiagnostics({requestId:init.requestId,status:'completed',timings:{catalogMs:0,firstModelEvent:10,completion:1010},usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}},tokens:{input:10,output:6,reasoning:2,cache:{read:5,write:0}}});return Response.json({id:'test',choices:[{message:{content:'fixture answer'},finish_reason:'stop'}],usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}}});}
@@ -74,6 +74,13 @@ test('custom mappings extend native choices and clearing them validates default 
   const saved=await readFile(path.join(directory,'config.json'),'utf8');
   await assert.rejects(()=>runtime.updateModel('fixture/mock',{reasoningVariants:{}}),e=>e.code==='unsupported_reasoning_effort');assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),saved);
   await runtime.updateModel('fixture/mock',{reasoningVariants:null,defaults:{reasoning_effort:null}});assert.deepEqual((await runtime.models())[0].customReasoningEfforts,[]);assert.deepEqual((await runtime.models())[0].reasoningEfforts,['low','high']);
+}));
+
+test('selection-only reasoning configuration persists and generates the same SDK mapping for all model IDs',async()=>fixture(async({runtime,directory})=>{
+  await runtime.updateModel('fixture/mock',{reasoningPreset:{type:'effort',levels:['high','max']},defaults:{reasoning_effort:'max'}});
+  assert.deepEqual(runtime.current.bridge.acceptedModels['fixture/mock'].reasoningVariants,{high:{reasoningEffort:'high'},max:{reasoningEffort:'max'}});assert.equal((await runtime.models())[0].reasoningAdapter,'effort');
+  const persisted=JSON.parse(await readFile(path.join(directory,'config.json'),'utf8')).modelOverrides['fixture/mock'];assert.equal(persisted.reasoningVariants,undefined);assert.deepEqual(persisted.reasoningPreset,{type:'effort',levels:['high','max']});
+  await assert.rejects(()=>runtime.updateModel('fixture/mock',{reasoningPreset:{type:'budget',levels:['high'],budgets:{high:8192}}}),/SDK/);
 }));
 test('statistics persist, failed/cancelled requests do not influence Magpie speed and failed includes cancellation',async()=>{
   const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-proxy-stats-'));try{const telemetry=new Telemetry(path.join(directory,'statistics.json'));await telemetry.load();const id=randomUUID();telemetry.begin({id,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-7000,stream:true,clientFirstMs:2000,usage:{prompt_tokens:10,completion_tokens:500}});telemetry.finish(id,{httpStatus:200});await telemetry.close();assert.equal(telemetry.totals.generationTokens,500);assert.ok(telemetry.totals.generationMs>=5000);const cancelled=randomUUID();telemetry.begin({id:cancelled,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-5000,stream:true,clientFirstMs:1000,cancelled:true});telemetry.finish(cancelled,{httpStatus:499});await telemetry.close();const restored=new Telemetry(telemetry.file);await restored.load();assert.equal(restored.totals.requests,2);assert.equal(restored.totals.failed,1);assert.equal(restored.totals.cancelled,1);assert.equal(restored.totals.ttftSamples,1);}finally{await rm(directory,{recursive:true,force:true});}

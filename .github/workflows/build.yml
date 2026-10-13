@@ -63,9 +63,9 @@ jobs:
       - name: Archive standalone application
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.4.0-windows-x64.zip'
+            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.5.0-windows-x64.zip'
           else
-            tar -czf dist/opencode-proxy-0.4.0-linux-x64.tar.gz -C dist/linux .
+            tar -czf dist/opencode-proxy-0.5.0-linux-x64.tar.gz -C dist/linux .
           fi
       - uses: actions/upload-artifact@v4
         with:

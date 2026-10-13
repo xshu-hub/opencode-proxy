@@ -66,7 +66,9 @@ ssh -L 8788:127.0.0.1:8788 user@server
 
 ## 思考强度与后台运行
 
-模型 → 参数与别名 → 自定义思考强度映射，可将标准强度名称映射到 OpenCode SDK 参数。例如 OpenAI 兼容 SDK 使用 `{"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}`；支持原生 thinking 的 SDK 可使用 `{"high":{"thinking":{"type":"enabled","budgetTokens":8192}}}`。参数格式由实际 SDK 决定；供应商仍可能拒绝某些档位或预算。自定义映射覆盖同名原生档位，留空恢复原生；客户端明确指定的强度优先于默认值。映射只写入本工具配置，不修改全局 OpenCode。
+模型 → 参数与别名，直接选择中文思考档位；“配置可选思考档位”可勾选档位，支持原生 Anthropic SDK 的模型可输入思考预算（至少 1024，且小于最大输出）。程序根据 OpenCode 报告的 SDK 生成参数，不要求填写 JSON。未知 SDK 保留原生档位。客户端明确指定时优先，配置只作用于本工具；上游仍须支持所选档位。0.4.0 的已有高级映射继续兼容读取。
+
+当前版本并未完整移植 Magpie 的全部页面功能。已核实的缺项、参考源码与分步验收条件见 [Magpie 对照审查](docs/magpie-parity.md)。
 
 Windows 关闭窗口默认隐藏到托盘并继续提供 API。点击托盘图标、托盘菜单“打开 OpenCode Proxy”或重新启动 EXE 可恢复窗口；托盘菜单“退出并停止服务”和页面“退出程序”才会停止服务。运行 `opencode-proxy.exe --background` 可启动到托盘。托盘初始化失败时保留可见窗口，关闭仍能退出。最小化保留任务栏窗口。
 
