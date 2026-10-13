@@ -43,7 +43,7 @@ ssh -L 8788:127.0.0.1:8788 user@server
 
 ## 客户端连接
 
-在 Cherry Studio 等 OpenAI 兼容客户端填写 API 基址和界面中的访问 Key，再刷新模型列表。对外支持 `/v1/models`、`/v1/chat/completions`，包含 JSON、流式文本/思考和客户端 function tools。尚未实现 `/v1/responses`、图片、音频和 embeddings。
+在 Cherry Studio 等 OpenAI 兼容客户端填写 API 基址和界面中的访问 Key，再刷新模型列表。对外支持 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`，包含 JSON、流式文本和客户端 function tools。Anthropic SDK 使用不含 `/v1` 的服务器根地址。暂不支持图片、音频和 embeddings；其他协议差异见 [协议说明](docs/protocols.md)。
 
 未配置访问 Key 时首次启动自动生成，可从本地界面查看/复制。`OPENCODE_PROXY_API_KEY` 或旧 `BRIDGE_API_KEY` 仅用于首次生成配置时的初始值；后续以保存的配置为准。这些是反代访问密钥，不是供应商凭证。
 
