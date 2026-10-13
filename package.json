@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/opencode-proxy",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "description": "Standalone OpenAI-compatible API through the real global OpenCode program",
   "license": "MIT",

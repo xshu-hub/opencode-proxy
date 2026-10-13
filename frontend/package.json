@@ -1,14 +1,10 @@
 {
   "name": "opencode-proxy-ui",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "node --check src/app.js && node --check src/magpie/controls.js && vite build"
-  },
-  "devDependencies": {
-    "vite": "8.3.4"
+    "build": "node ../scripts/build-ui.mjs"
   },
   "dependencies": {
     "@xshu-hub/opencode-proxy": "file:.."

@@ -12,3 +12,6 @@ dist/
 statistics.json
 requests/
 desktop.log
+frontend/public/icons/*
+!frontend/public/icons/favicon.svg
+!frontend/public/icons/opencode.svg

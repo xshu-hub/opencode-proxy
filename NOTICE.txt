@@ -4,6 +4,6 @@ Original bridge version: 0.13.0.
 Retains the original MIT license and copyright notice.
 This repository contains no Magpie backend application or plugin adapter.
 
-The frontend directly reuses Magpie app.css, opencode.svg, HTML header/list/ledger structure and selected app.js DOM controls (including the model switch and effort slider/pointer/keyboard logic). library.css switch rules are retained. Unrelated pages and original Magpie/Wails runtime/API calls are removed; the UI calls the standalone OpenCode Proxy management API.
-Source metadata and checksums: frontend/src/magpie/SOURCE.json. Refresh script: scripts/vendor-magpie.mjs. Original MIT notice retained.
+The frontend is based on Magpie's complete index.html, app.js, i18n.js, caller-keys.js, app.css, library.css, supporting scripts and icons at the pinned commit above. The actual provider, model editor, gateway, connection examples, usage charts, request ledger, modal, picker, and key renderers are retained. OpenCode-specific edits are in scripts/vendor-magpie.mjs and frontend/public/proxy-adapter.js. Unrelated agent/session/library/plugin views are removed after original initialization; their additional scripts are not loaded. No Magpie server or Magpie plugin is built or used.
+Source metadata and original file checksums: frontend/public/SOURCE.json. Refresh script: scripts/vendor-magpie.mjs. Original MIT notice retained.
 The metric rules ledDecode/ledRowSpeed and flowMs derive from Magpie app.js, gateway/ttft.go, and usage/usage.go at the same source commit. All retain the original MIT notice.

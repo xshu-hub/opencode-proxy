@@ -5,8 +5,8 @@
 独立的 OpenCode 反代工具，带 Windows EXE 客户端和 Linux 服务端。
 客户端 → OpenCode Proxy → 真实全局 OpenCode → 已配置的上游供应商。
 
-0.3.0 前端直接从 Magpie HTML/CSS/JavaScript 精简适配，移除 Vue/Naive UI 和无关页面；复用顶部导航、模型列表、开关、思考强度滑块/键盘操作和日志布局。复用源码与许可记录见 NOTICE.txt。
-模型开关和默认思考强度即时保存；停用模型从 `/v1/models` 隐藏，短名、别名及原生完整 ID 的新请求均返回 403，三种协议一致。已运行的请求继续完成。支持按供应商分组、启用状态筛选、搜索和批量启停。
+0.6.0 以 Magpie 完整前端源码为底稿修改精简，旧版自制页面已删除。保留原供应商列表、模型编辑器、网关接入示例、访问 Key、用量图表、请求表格、弹窗和菜单。具体源码范围与裁剪说明见 [前端移植说明](docs/frontend-port.md) 和 NOTICE.txt。
+供应商开关即时保存；模型编辑器内的勾选、别名和参数通过“保存”一次提交，取消可丢弃修改。停用模型从 `/v1/models` 隐藏，短名、别名及原生完整 ID 的新请求均返回 403，三种协议一致。已运行的请求继续完成。支持供应商分组、模型搜索和批量选择。
 
 ## Windows 客户端
 
@@ -23,7 +23,7 @@
 
 参数留空时跟随 OpenCode；客户端显式参数优先。配置上限不能超过 OpenCode 报告的上限。模型别名不能与其他模型冲突。
 
-默认配置位置是 `%LOCALAPPDATA%\OpenCodeProxy\config.json`。统计保存在同目录 statistics.json，完整请求和原始响应保存在 requests 目录。关闭桌面窗口会关闭其启动的服务和 OpenCode 子进程。
+默认配置位置是 `%LOCALAPPDATA%\OpenCodeProxy\config.json`。统计保存在同目录 statistics.json，完整请求和原始响应保存在 requests 目录。关闭桌面窗口隐藏到托盘，网关继续运行；设置 → 常规 → 退出程序会停止后台服务。可用 `--background` 启动到后台。
 
 ## Linux 服务端
 
@@ -95,6 +95,6 @@ npm run package:windows  # 需要 Go 和 Bun
 npm run package:linux   # 需要 Bun
 ```
 
-Windows 桌面使用 Wails 2 + Go + WebView2，界面直接复用并精简 Magpie 的 HTML、CSS、JavaScript，通过 Vite 打包。服务核心继续使用已有 JavaScript，通过 Bun 打包。只有 OpenCode 原生 worker 的脚本资源会作为文件交给 OpenCode 加载。
+Windows 桌面使用 Wails 2 + Go + WebView2。界面直接修改精简 Magpie 的原始 HTML/CSS/JavaScript，通过独立资源构建脚本打包，无需构建 Magpie。服务核心使用 JavaScript，通过 Bun 打包。OpenCode 原生 worker 的脚本资源作为文件交给 OpenCode 加载。
 
 GitHub 默认构建 Windows 和 Linux 产物，执行快速测试、前端 JavaScript 语法检查，并使用真实 OpenCode 1.18.35 与本地模拟供应商验证打包后的服务、别名/参数、工具流、完整日志与重启统计。手动 compatibility 才运行另外四组合完整测试。不会构建 Magpie，也不会在 CI 调用生产账号。

@@ -42,6 +42,17 @@ test('model validation rejects conflicting aliases and invalid defaults before p
   assert.throws(()=>validateSettings({...config(),modelOverrides:{'fixture/mock':{defaults:{temperature:3}}}},directory));
   assert.deepEqual(withModelDefaults({max_completion_tokens:50,temperature:0.9},{defaults:{max_tokens:100,temperature:0.2,top_p:0.8}}),{max_completion_tokens:50,temperature:0.9,top_p:0.8});
 }));
+test('Magpie model editor batch save is atomic, clears overrides, and preserves other settings',async()=>fixture(async({runtime,base,directory})=>{
+  const headers={authorization:'Bearer fixture-admin-key','content-type':'application/json'};
+  const send=updates=>fetch(base+'/admin/models/batch',{method:'POST',headers,body:JSON.stringify({updates})});
+  let response=await send([{target:'fixture/mock',patch:{alias:'short',defaults:{temperature:0.4,reasoning_effort:'high'}}}]);assert.equal(response.status,200);await response.json();
+  const saved=await readFile(path.join(directory,'config.json'),'utf8'),generation=runtime.current;
+  response=await send([{target:'fixture/mock',patch:{alias:'would-be-partially-saved'}},{target:'missing/model',patch:{enabled:false}}]);assert.equal(response.status,400);
+  assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),saved);assert.equal(runtime.current,generation);
+  response=await send([{target:'fixture/mock',patch:{output:2000}}]);assert.equal(response.status,400);assert.equal(runtime.current,generation);
+  response=await send([{target:'fixture/mock',patch:{alias:null,defaults:{temperature:null,reasoning_effort:null},reasoningPreset:{type:'native'},reasoningVariants:null}}]);assert.equal(response.status,200);await response.json();
+  assert.equal((await runtime.models())[0].id,'mock');assert.deepEqual(runtime.settings.modelOverrides['fixture/mock'].defaults,{});assert.equal(runtime.settings.apiKeys[0].key,'fixture-access-key');
+}));
 test('Magpie reasoning/TTFT/speed samples match the original ledger regression cases',()=>{
   const rows=[{out:2200,reasoning:2000,ms:15500,ttft_ms:14000,first_text_ms:14000},{out:2200,reasoning:2000,ms:15500,ttft_ms:13990,first_text_ms:14000},{out:1300,reasoning:1000,ms:9000,ttft_ms:6000,first_text_ms:6000},{out:1500,reasoning:1400,ms:9000,ttft_ms:8000,first_text_ms:0},{out:900,reasoning:1000,ms:9000,ttft_ms:6000,first_text_ms:6000},{out:500,reasoning:0,ms:7000,ttft_ms:2000},{out:900,reasoning:300,ms:7000}];
   const decoded=rows.map(r=>ledDecode({...r,status:200})).filter(Boolean);

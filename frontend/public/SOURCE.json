@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/yetone/magpie",
+  "commit": "210234a5f33e0f2643f82b4337e249cf0fe81371",
+  "license": "MIT",
+  "files": {
+    "app.js": "c2245f138753a93722e1074a8d1527b2ac226072d56977d5abe5054b4bfc61af",
+    "app.css": "47625d9c363a77691247459d544f81c6cfaae73d362046ec99a3d2c6bac06338",
+    "index.html": "2b70bd980075ed7025ac7d224a4cad96677f5b435f48b0c589566d7bc5e49354",
+    "i18n.js": "864748f4d192119cf1efd45c61bed3d125e4886dcb86a13784abdc43b2112829",
+    "caller-keys.js": "b3b6698fad0a1336030505fe8accc0cbaec6bf023da234a9edf3f939abd702de",
+    "purposes.js": "27ca32889e9e96575835777a80b013154f72707595b85923685a9cb3e40de5fc",
+    "compat.js": "d16dbd3f425728916bd210d88ee3631471ef0d522ed839668078ecd12613ef1a",
+    "layout.js": "80580334371cdaccc2a3630a627202f75fbe640039707526357bb3902d452338",
+    "fonts.js": "ecc17b4c98b0eda8da226bfded729f8b1d9847ab6fb11ba204142beb6246c94f",
+    "theme.js": "0788b7cd63c40e1485cd7550cdda95da6e6348a709bd29e9490cad247781ef75",
+    "omarchy.js": "4a2165de54a87e184398d0ed2f1bc5e1ab9217b7e623c1c90d4d632180d569b9",
+    "omarchy.css": "9bcf4dc2aec8d7abad211e31084e1fc89841d82530053689bd013cb1b2cd37fd",
+    "library.css": "01b42e4cad68e01c218c8c5c7fa71c046a2456306d7fff896d13ee160c15a9dd"
+  },
+  "base": "Full index.html, app.js, i18n.js, caller-keys.js and styles; renderer overrides live in proxy-adapter.js. Non-proxy views are pruned after original event initialization.",
+  "patches": "See scripts/vendor-magpie.mjs; checked substitutions preserve original provider/model/gateway/usage/ledger/modal/menu rendering."
+}

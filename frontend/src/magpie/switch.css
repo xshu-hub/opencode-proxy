@@ -1,5 +1,0 @@
-/* Magpie library.css switches, MIT (c) 2026 yetone. */
-.lib-switch { flex: none; position: relative; width: 32px; height: 19px; border-radius: 10px; background: var(--line); transition: background .2s var(--ease); }
-.lib-switch i { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .22s var(--ease); }
-.lib-switch.on { background: var(--fg); }
-.lib-switch.on i { transform: translateX(13px); background: var(--card); }
