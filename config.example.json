@@ -1,0 +1,15 @@
+{
+  "mode": "global",
+  "command": [
+    "opencode"
+  ],
+  "maxConcurrent": 0,
+  "timeoutMs": 0,
+  "startupTimeoutMs": 30000,
+  "firstOutputTimeoutMs": 120000,
+  "idleTimeoutMs": 180000,
+  "workerReuse": true,
+  "maxIdleWorkers": 2,
+  "workerIdleMs": 60000,
+  "diagnostics": true
+}

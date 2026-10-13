@@ -1,0 +1,816 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, rm, symlink, stat, realpath } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
+import { OpenCodeBridge } from '../lib/bridge.mjs';
+import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
+import { normalizeConfig } from '../lib/bridge.mjs';
+import { createProxyServer } from '../lib/http-server.mjs';
+
+if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real OpenCode global-state test.');
+const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND);
+const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-global-fixture-'));
+const saved = { ...process.env };
+const data = path.join(home, 'data', 'opencode');
+const configDir = path.join(home, 'config', 'opencode');
+const authFile = path.join(data, 'auth.json');
+const observationsFile = path.join(home, 'worker-directories.jsonl');
+const workingDirectory = path.join(home, 'workspace 中文 with spaces');
+const observations = async () => (await readFile(observationsFile, 'utf8')).trim().split('\n').map(JSON.parse);
+const requests = [];
+let refreshes = 0;
+let parallelRequests;
+let pausedStream;
+let auditStream;
+let instructionFetches = 0;
+let skillFetches = 0;
+const upstream = http.createServer(async (req, res) => {
+  if (req.url === '/audit-instructions') { instructionFetches++; res.end('REMOTE_INSTRUCTION_SENTINEL'); return; }
+  if (req.url === '/audit-skills/index.json') { skillFetches++; res.setHeader('content-type', 'application/json'); res.end('{"skills":[]}'); return; }
+  if (req.url === '/refresh') {
+    refreshes++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ access: 'fixture-refreshed-access', refresh: 'fixture-refreshed-refresh', expires: Date.now() + 3600000 }));
+    return;
+  }
+  let raw = ''; for await (const chunk of req) raw += chunk;
+  const body = JSON.parse(raw);
+  requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
+  if (req.url === '/anthropic/messages') {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', { message: { id: 'msg_fixture', type: 'message', role: 'assistant', model: 'mock', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Native reasoning variant applied.' } });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } });
+    event('message_stop', {});
+    res.end(); return;
+  }
+  if (body.messages.some(m => m.role === 'user' && m.content === 'EARLY_UPSTREAM_REJECTION')) {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Fixture provider rejected this request.', type: 'permission_error' } }));
+    return;
+  }
+  if (body.messages.some(m => ['TIMEOUT_FIRST', 'TIMEOUT_IDLE'].includes(m.content))) {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (body.messages.some(m => m.content === 'TIMEOUT_IDLE')) res.write('data: ' + JSON.stringify({id:'timing',object:'chat.completion.chunk',created:1,model:'mock',choices:[{index:0,delta:{content:'Before idle.'},finish_reason:null}]}) + '\n\n');
+    const timer = setInterval(() => res.write(': upstream-heartbeat\n\n'), 40);
+    res.once('close', () => clearInterval(timer));
+    return;
+  }
+  const marker = body.messages.find(m => m.role === 'user' && typeof m.content === 'string' && parallelRequests?.has(m.content))?.content;
+  if (marker) {
+    const pending = parallelRequests.get(marker);
+    pending.started.resolve();
+    await pending.release.promise;
+    if (res.destroyed) return;
+  }
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
+  if (body.messages.some(m => m.content === 'AUDIT_INCREMENTAL')) {
+    for (const text of ['思', '考', '。']) { emit({ reasoning_content: text }); await delay(30); }
+    for (const text of ['你好', '🙂', '\n\n```python\n']) { emit({ content: text }); await delay(30); }
+    auditStream.started.resolve();
+    await auditStream.release.promise;
+    if (res.destroyed) return;
+    for (const text of auditStream.tail) { emit({ content: text }); await delay(5); }
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_LOCAL_TOOL')) {
+    emit({tool_calls:[{index:0,id:'audit_local',type:'function',function:{name:'bridge_audit_local',arguments:'{}'}}]});
+    emit({},'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
+  } else if (body.messages.some(m => m.role === 'user' && ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT'].includes(m.content))) {
+    if (body.messages.some(m => m.content === 'AUDIT_FILTER_TEXT')) emit({ content: 'Before filtering.' });
+    emit({},'content_filter',{prompt_tokens:10,completion_tokens:0,total_tokens:10});
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_REASONING')) {
+    emit({role:'assistant',reasoning_content:'思考中。'});
+    emit({content:'结论。'});
+    emit({},'stop',{prompt_tokens:100,completion_tokens:30,total_tokens:130,prompt_tokens_details:{cached_tokens:20},completion_tokens_details:{reasoning_tokens:10}});
+  } else if (body.tools?.length && !body.messages.some(m => m.role === 'tool')) {
+    for (const [i, name] of ['weather', 'clock'].entries()) emit({ tool_calls: [{ index: i, id: 'call_' + name, type: 'function', function: { name: nativeToolName(name), arguments: '{"city":"北京"}' } }] });
+    emit({}, 'tool_calls', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'HOLD_AFTER_FIRST_OUTPUT')) {
+    emit({ role: 'assistant', content: 'First streamed text.' });
+    pausedStream.started.resolve();
+    await pausedStream.release.promise;
+    if (res.destroyed) return;
+    pausedStream.finished = true;
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else if (marker) {
+    emit({ role: 'assistant', content: marker });
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } else {
+    emit({ role: 'assistant', content: '复用' }); emit({ content: '全局 OpenCode 登录。' });
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  }
+  res.end('data: [DONE]\n\n');
+});
+await new Promise(r => upstream.listen(0, '127.0.0.1', r));
+const baseURL = `http://127.0.0.1:${upstream.address().port}`;
+after(async () => {
+  upstream.closeAllConnections(); await new Promise(r => upstream.close(r));
+  for (const key of Object.keys(process.env)) if (!Object.hasOwn(saved, key)) delete process.env[key];
+  Object.assign(process.env, saved);
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+});
+await mkdir(data, { recursive: true });
+await mkdir(configDir, { recursive: true });
+await mkdir(workingDirectory);
+await writeFile(path.join(workingDirectory, 'keep.txt'), 'user-owned workspace');
+const projectConfig = '{"model":"project-must-not-load/missing"}';
+await writeFile(path.join(workingDirectory, 'opencode.json'), projectConfig);
+// Seed only the fixture's global SDK installation. Real user files are untouched.
+const sdk = process.env.TEST_OPENCODE_PLUGIN_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.resolve('@opencode-ai/plugin'))), '..');
+const manifest = JSON.parse(await readFile(path.join(sdk, 'package.json'), 'utf8'));
+await cp(sdk, path.join(configDir, 'node_modules', '@opencode-ai', 'plugin'), { recursive: true });
+await writeFile(path.join(configDir, 'package.json'), JSON.stringify({ private: true, dependencies: { '@opencode-ai/plugin': manifest.version } }));
+await writeFile(path.join(configDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { '@opencode-ai/plugin': manifest.version } }, 'node_modules/@opencode-ai/plugin': { version: manifest.version } } }));
+const loginPlugin = path.join(configDir, 'fixture-auth.mjs');
+await writeFile(loginPlugin, `import { appendFile } from 'node:fs/promises';
+export const FixtureAuth = async ({ client, directory }) => {
+  await appendFile(${JSON.stringify(observationsFile)}, JSON.stringify({ cwd: process.cwd(), directory, db: process.env.OPENCODE_DB, pid: process.pid }) + '\\n');
+  return {
+  auth: { provider: 'fixture-oauth', methods: [], loader: async getAuth => ({
+    apiKey: 'fixture-sdk-placeholder',
+    fetch: async (url, init) => {
+      let auth = await getAuth();
+      if (auth.expires < Date.now()) {
+        const fresh = await fetch(${JSON.stringify(baseURL + '/refresh')}, { method: 'POST' }).then(r => r.json());
+        auth = { type: 'oauth', ...fresh };
+        await client.auth.set({ path: { id: 'fixture-oauth' }, body: auth });
+      }
+      const headers = new Headers(init.headers);
+      headers.set('authorization', 'Bearer ' + auth.access);
+      return fetch(url, { ...init, headers });
+    }
+  }) }
+  };
+};\n`);
+const globalConfig = {
+  $schema: 'https://opencode.ai/config.json',
+  model: 'fixture-oauth/mock',
+  plugin: [pathToFileURL(loginPlugin).href],
+  provider: {
+    'fixture-oauth': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: { mock: { name: 'Subscription fixture', temperature: true, limit: { context: 100000, output: 1000 } } } },
+    'fixture-api': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: {
+      mock: { name: 'Saved key fixture', limit: { context: 100000, output: 1000 } },
+      'text-only': { temperature: false, tool_call: false, limit: { context: 100000, output: 1000 } },
+      'DeepSeek-V4.1-Flash-line2-maas': { name: 'DeepSeek-V4.1-Flash-line2-maas', reasoning: false, options: { reasoningEffort: 'xhigh' }, limit: { context: 100000, output: 1000 } },
+      'native-variants': { reasoning: true, options: { reasoningEffort: 'xhigh', fixture_nested: { keep: 'base', choose: 'base' } }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high', fixture_nested: { choose: 'native-high' } }, max: { reasoningEffort: 'max' }, private: { privateVariantToken: 'must-not-enter-metadata' } }, limit: { context: 100000, output: 1000 } },
+    } },
+    'fixture-anthropic': { npm: '@ai-sdk/anthropic', options: { baseURL: baseURL + '/anthropic' }, models: {
+      'native-thinking': { reasoning: true, variants: { high: { thinking: { type: 'enabled', budgetTokens: 1024 } } }, limit: { context: 100000, output: 4096 } },
+      'no-reasoning': { reasoning: false, limit: { context: 100000, output: 4096 } },
+    } },
+  },
+  // These would be dangerous for the API worker if inherited without restrictions.
+  permission: { '*': 'allow' },
+  mcp: { unused: { type: 'remote', url: 'http://127.0.0.1:1', enabled: false } },
+};
+const originalConfig = JSON.stringify(globalConfig);
+await writeFile(path.join(configDir, 'opencode.json'), originalConfig);
+await writeFile(authFile, JSON.stringify({
+  'fixture-oauth': { type: 'oauth', access: 'fixture-expired-access', refresh: 'fixture-refresh', expires: 0 },
+  'fixture-api': { type: 'api', key: 'fixture-saved-api-key' },
+  'fixture-anthropic': { type: 'api', key: 'fixture-native-api-key' },
+  untouched: { type: 'api', key: 'fixture-unrelated-key' },
+}));
+Object.assign(process.env, {
+  HOME: home, USERPROFILE: home,
+  XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'data'),
+  XDG_CACHE_HOME: path.join(home, 'cache'), XDG_STATE_HOME: path.join(home, 'state'),
+  OPENCODE_DISABLE_MODELS_FETCH: '1',
+});
+for (const key of ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT', 'OPENCODE_AUTH_CONTENT']) delete process.env[key];
+let fixtureCommand = command;
+if (command.length === 1) {
+  const bin = path.join(home, 'global-bin');
+  await mkdir(bin);
+  if (process.platform === 'win32') {
+    const root = path.resolve(path.dirname(command[0]), '..');
+    const pkg = await readFile(path.join(root, 'package.json'), 'utf8').then(JSON.parse, () => undefined);
+    if (pkg?.name === 'opencode-ai') {
+      const shimPackage = path.join(bin, 'node_modules', '@opencode', 'opencode-ai');
+      await mkdir(shimPackage, { recursive: true });
+      await symlink(path.dirname(command[0]), path.join(shimPackage, 'bin'), 'junction');
+      // PowerShell-created global manifests may contain a UTF-8 BOM. Follow the
+      // package's declared bin without requiring a filename or runtime version.
+      await writeFile(path.join(shimPackage, 'package.json'), '\ufeff' + JSON.stringify({ name: '@opencode/opencode-ai', version: 'unlisted', bin: { opencode: './bin/' + path.basename(command[0]) } }));
+      await writeFile(path.join(bin, 'opencode.cmd'), '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@opencode\\opencode-ai\\bin\\' + path.basename(command[0]) + '"   %*\r\n');
+      fixtureCommand = undefined;
+    } else {
+      await symlink(command[0], path.join(bin, 'opencode.exe'));
+      fixtureCommand = undefined;
+    }
+  } else {
+    await symlink(command[0], path.join(bin, 'opencode'));
+    fixtureCommand = undefined;
+  }
+  process.env.PATH = bin + path.delimiter + (process.env.PATH ?? process.env.Path ?? '');
+}
+const options = { workerReuse: false, diagnostics: false, mode: 'global', ...(fixtureCommand ? { command: fixtureCommand } : {}), timeoutMs: 45000, startupTimeoutMs: 20000, models: { 'oc-default': { context: 100000, output: 1000 } } };
+options.onFailure = async ({ phase, output, events }) => {
+  console.log('Global OpenCode fixture phase:', phase, 'output:', output, 'events:', events);
+  const dir = path.join(data, 'log');
+  for (const name of await readdir(dir).catch(() => [])) console.log('Fixture OpenCode log:', (await readFile(path.join(dir, name), 'utf8')).slice(-18000));
+};
+const bridge = new OpenCodeBridge(options);
+const request = (body, instance = bridge) => instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'oc-default', ...body }) }, 'not-the-upstream-key');
+
+test('real global v1 loads its configured OAuth plugin, refreshes its own login and uses its default model', { timeout: 60000 }, async () => {
+  const fetchOriginal = globalThis.fetch;
+  let subscriptions = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/global/health')) {
+      const response = await fetchOriginal(url, init);
+      if (!response.ok) return response;
+      return Response.json({ ...await response.json(), version: 'unlisted-test-build' });
+    }
+    if (String(url).endsWith('/event') && subscriptions++ === 0) {
+      assert.equal(requests.length, 0, 'No inference until the event subscription works');
+      return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+    }
+    return fetchOriginal(url, init);
+  };
+  let response, chunks;
+  try {
+    response = await request({ messages: [{ role: 'system', content: 'Global system' }, { role: 'user', content: 'Hello' }], stream: true });
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    chunks = await Array.fromAsync(sseEvents(response.body));
+  } finally { globalThis.fetch = fetchOriginal; }
+  assert.ok(subscriptions >= 2, 'An empty event response is retried before inference');
+  assert.equal(response.status, 200, JSON.stringify(chunks));
+  assert.equal(response.headers.get('x-opencode-version'), 'unlisted-test-build', 'An unknown reported version must not prevent inference');
+  assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+  assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), '复用全局 OpenCode 登录。');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].auth, 'Bearer fixture-refreshed-access');
+  assert.equal(requests[0].body.model, 'mock');
+  assert.equal(refreshes, 1);
+  const auth = JSON.parse(await readFile(authFile, 'utf8'));
+  assert.equal(auth['fixture-oauth'].refresh, 'fixture-refreshed-refresh');
+  assert.equal(auth.untouched.key, 'fixture-unrelated-key');
+  assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), originalConfig);
+  assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false, 'API sessions use a temporary database');
+  const worker = (await observations()).at(-1);
+  assert.equal(path.basename(worker.cwd), 'workspace');
+  assert.match(path.basename(path.dirname(worker.cwd)), /^opencode-proxy-/);
+  await assert.rejects(() => stat(worker.cwd), { code: 'ENOENT' }, 'Default workspaces are cleaned after inference');
+});
+
+test('standalone HTTP service uses global login and the chosen directory without loading project config or deleting files', { timeout: 60000 }, async t => {
+  const file = path.join(home, 'custom-bridge.json');
+  await writeFile(file, JSON.stringify({ ...options, workingDirectory: './' + path.basename(workingDirectory), models: undefined, onFailure: undefined }));
+  const proxy = new OpenCodeBridge(normalizeConfig(JSON.parse(await readFile(file,'utf8')),path.dirname(file)));
+  const before = requests.length;
+  assert.ok((await proxy.loadModels())['fixture-oauth/mock']);
+  assert.equal(requests.length, before, 'Discovery must not infer');
+  const discovered = (await observations()).at(-1);
+  assert.equal(await realpath(discovered.cwd), await realpath(workingDirectory));
+  assert.equal(await realpath(discovered.directory), await realpath(workingDirectory));
+  assert.match(path.basename(path.dirname(discovered.db)), /^opencode-proxy-models-/);
+  await assert.rejects(() => stat(discovered.db), { code: 'ENOENT' });
+  const server=createProxyServer({bridge:proxy,apiKey:'fixture-client-key'});
+  t.after(()=>server.shutdown());
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const response=await fetch('http://127.0.0.1:'+server.address().port+'/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-key'},body:JSON.stringify({model:'fixture-oauth/mock',messages:[{role:'user',content:'Hello'}],stream:true})});
+  assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+  const chunks = await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), '复用全局 OpenCode 登录。');
+  assert.equal(requests.length, before + 1);
+  const inferred = (await observations()).at(-1);
+  assert.equal(await realpath(inferred.cwd), await realpath(workingDirectory));
+  assert.equal(await realpath(inferred.directory), await realpath(workingDirectory));
+  assert.notEqual(inferred.db, discovered.db);
+  await assert.rejects(() => stat(inferred.db), { code: 'ENOENT' });
+  assert.equal(await readFile(path.join(workingDirectory, 'keep.txt'), 'utf8'), 'user-owned workspace');
+  assert.equal(await readFile(path.join(workingDirectory, 'opencode.json'), 'utf8'), projectConfig);
+});
+test('any provider SDK can return complete tool batches without local execution or a second inference', { timeout: 120000 }, async () => {
+  const before = requests.length;
+  const tools = ['weather', 'clock'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false } } }));
+  const body = { model: 'oc-default', messages: [{ role: 'user', content: 'Call the tools' }], tools, stream: true, stream_options: { include_usage: true } };
+  const run = await bridge.prepare(body);
+  try {
+    const deadline = Date.now() + 10000;
+    while (requests.length === before && Date.now() < deadline) await delay(50);
+    // Slow event consumption must never allow OpenCode to infer using a deferral acknowledgement.
+    await delay(1000);
+    assert.equal(requests.length, before + 1);
+    assert.deepEqual(requests.at(-1).body.tools.map(t => t.function.name).sort(), ['weather', 'clock'].map(nativeToolName).sort(), 'No global built-in or unrelated MCP tool reaches the model');
+    for (const name of ['weather', 'clock']) assert.match(requests.at(-1).body.tools.find(t => t.function.name === nativeToolName(name)).function.description, new RegExp('Client function: ' + name));
+    const chunks = await Array.fromAsync(bridge.chunks(body, run, { id: 'test', created: 0, model: 'oc-default' }));
+    const calls = chunks.flatMap(c => c.choices[0]?.delta.tool_calls ?? []);
+    assert.deepEqual(calls.map(c => c.function.name), ['weather', 'clock']);
+    assert.equal(chunks.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
+    assert.equal(requests.length, before + 1);
+    assert.equal(chunks.at(-1).usage.total_tokens, 15);
+    const response = await request({ messages: [...body.messages, { role: 'assistant', content: null, tool_calls: calls.map(({ index, ...c }) => c) }, { role: 'tool', tool_call_id: 'call_clock', content: '10:00' }, { role: 'tool', tool_call_id: 'call_weather', content: '北京 23C' }], tools });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.deepEqual(requests.at(-1).body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'tool']);
+    assert.equal(requests.at(-1).body.messages.at(-1).content, '10:00');
+    assert.equal(requests.length, before + 2);
+  } finally { await run.cleanup(); }
+});
+test('explicit model selection still uses the global saved key and ignores a client authentication key', { timeout: 60000 }, async () => {
+  const selected = new OpenCodeBridge({ ...options, models: { 'oc-default': { ...options.models['oc-default'], model: 'fixture-api/mock' } } });
+  const response = await request({ messages: [{ role: 'user', content: 'Hello' }] }, selected);
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
+  assert.equal(refreshes, 1, 'Refreshed credentials survive a new worker');
+});
+
+test('reasoning_effort on the reported custom DeepSeek name reaches upstream and overrides defaults only when requested', { timeout: 120000 }, async () => {
+  const selected = new OpenCodeBridge({ ...options, models: { 'oc-default': { ...options.models['oc-default'], model: 'fixture-api/DeepSeek-V4.1-Flash-line2-maas' } } });
+  for (const reasoning_effort of ['high', 'low', 'none', 'max', undefined]) {
+    const before = requests.length;
+    const response = await request({ messages: [{ role: 'user', content: 'Hello' }], ...(reasoning_effort === undefined ? {} : { reasoning_effort }), stream: reasoning_effort === 'high' }, selected);
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    if (reasoning_effort === 'high') await Array.fromAsync(sseEvents(response.body));
+    else assert.equal((await response.json()).choices[0].finish_reason, 'stop');
+    assert.equal(requests.length, before + 1);
+    assert.equal(requests.at(-1).body.model, 'DeepSeek-V4.1-Flash-line2-maas');
+    assert.equal(requests.at(-1).body.reasoning_effort, reasoning_effort ?? 'xhigh');
+  }
+});
+
+test('native OpenCode variants are applied and only public reasoning metadata is advertised', { timeout: 60000 }, async () => {
+  const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
+  await discovered.loadModels();
+  const model = discovered.config.models['native-variants'];
+  assert.equal(model.reasoning, true);
+  assert.deepEqual(model.reasoningEfforts.sort(), ['high', 'low', 'max', 'medium']);
+  assert.equal(JSON.stringify(discovered.config.models).includes('must-not-enter-metadata'), false);
+  const response = await discovered.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'fixture-api/native-variants', reasoning_effort: 'high', messages: [{ role: 'user', content: 'Hello' }] }) });
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(requests.at(-1).body.reasoning_effort, 'high');
+  assert.deepEqual(requests.at(-1).body.fixture_nested, { keep: 'base', choose: 'native-high' });
+
+});
+
+test('native SDK reasoning uses OpenCode thinking options and unmappable requests return 400 before inference', { timeout: 60000 }, async () => {
+  const selected = new OpenCodeBridge({ ...options, onFailure: undefined, models: {
+    'native-thinking': { model: 'fixture-anthropic/native-thinking', context: 100000, output: 4096 },
+    'no-reasoning': { model: 'fixture-anthropic/no-reasoning', context: 100000, output: 4096 },
+  } });
+  const send = model => selected.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model, reasoning_effort: 'high', messages: [{ role: 'user', content: 'Hello' }], stream: true }) });
+  const response = await send('native-thinking');
+  assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+  const chunks = await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), 'Native reasoning variant applied.');
+  assert.deepEqual(requests.at(-1).body.thinking, { type: 'enabled', budget_tokens: 1024 });
+  assert.equal(requests.at(-1).body.reasoning_effort, undefined, 'Native Anthropic must not receive an OpenAI field');
+  assert.equal(requests.at(-1).apiKey, 'fixture-native-api-key');
+  const before = requests.length;
+  const rejected = await send('no-reasoning');
+  const error = (await rejected.json()).error;
+  assert.equal(rejected.status, 400, JSON.stringify(error));
+  assert.equal(error.param, 'reasoning_effort');
+  assert.equal(error.code, 'unsupported_reasoning_effort');
+  assert.equal(requests.length, before, 'An unmappable request must not infer with its effort silently ignored');
+  assert.equal(selected.active, 0);
+});
+
+test('upstream rejection before any output returns an HTTP error instead of a successful empty SSE stream', { timeout: 60000 }, async () => {
+  const before = requests.length;
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+  const response = await request({ messages: [{ role: 'user', content: 'EARLY_UPSTREAM_REJECTION' }], stream: true }, instance);
+  const result = await response.json();
+  assert.equal(response.status, 502, JSON.stringify(result));
+  assert.match(response.headers.get('content-type'), /^application\/json/);
+  assert.equal(result.error.message, 'Fixture provider rejected this request.');
+  assert.ok(['opencode_session_error', 'opencode_inference_error'].includes(result.error.code));
+  assert.equal(requests.length, before + 1, 'A provider rejection is not retried as another model call');
+  assert.equal(instance.active, 0, 'Rejected requests release their worker');
+});
+
+test('successful SSE starts at the first model output without waiting for completion', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+  pausedStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), finished: false };
+  let events;
+  try {
+    const responsePromise = request({ messages: [{ role: 'user', content: 'HOLD_AFTER_FIRST_OUTPUT' }], stream: true, stream_options: { include_usage: true } }, instance);
+    await Promise.race([pausedStream.started.promise, delay(15000).then(() => { throw new Error('Upstream did not start'); })]);
+    const response = await Promise.race([responsePromise, delay(5000).then(() => { throw new Error('Response buffered until completion'); })]);
+    assert.equal(response.status, 200);
+    events = sseEvents(response.body);
+    assert.equal((await events.next()).value.choices[0].delta.role, 'assistant');
+    assert.equal((await events.next()).value.choices[0].delta.content, 'First streamed text.');
+    assert.equal(pausedStream.finished, false, 'Text reaches the client while inference is still running');
+    pausedStream.release.resolve();
+    const rest = await Array.fromAsync(events);
+    assert.equal(rest.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, 'stop');
+    assert.equal(rest.at(-1).usage.total_tokens, 15);
+    assert.equal(instance.active, 0);
+  } finally { pausedStream.release.resolve(); await events?.return(); }
+});
+
+test('Cherry Studio multi-turn history with empty, null or nonempty reasoning goes through real global OpenCode', { timeout: 120000 }, async () => {
+  for (const reasoning_content of ['', null, 'GLOBAL_PRIOR_REASONING_SENTINEL']) {
+    const before = requests.length;
+    const response = await request({ messages: [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Previous answer', reasoning_content },
+      { role: 'user', content: 'Continue' },
+    ] });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(result.choices[0].message.content, '复用全局 OpenCode 登录。');
+    assert.equal(requests.length, before + 1);
+    const sent = requests.at(-1).body.messages;
+    assert.deepEqual(sent.map(m => m.role), ['user', 'assistant', 'user']);
+    assert.equal(sent[1].content, 'Previous answer');
+    assert.equal(sent[1].reasoning_content || '', reasoning_content || '');
+    assert.equal(sent[2].content, 'Continue');
+  }
+});
+
+test('global model discovery lists connected providers and calls the selected model without copying credentials', { timeout: 60000 }, async () => {
+  const discovered = new OpenCodeBridge({ ...options, discoverModels: true });
+  const before = requests.length;
+  const listing = await discovered.fetch('http://bridge/v1/models');
+  const models = await listing.json();
+  assert.equal(listing.status, 200, JSON.stringify(models));
+  for (const id of ['oc-default', 'fixture-api/mock', 'fixture-oauth/mock']) assert.ok(models.data.some(m => m.id === id), id + ' must be selectable');
+  assert.equal(requests.length, before, 'Listing models must not initiate inference');
+  for (const value of Object.values(discovered.config.models)) assert.deepEqual(Object.keys(value).sort().filter(k => ['apiKey', 'baseURL', 'options', 'headers'].includes(k)), []);
+  const response = await discovered.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'fixture-api/mock', messages: [{ role: 'user', content: 'Hello' }] }) });
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(requests.length, before + 1);
+  assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
+  assert.equal(requests.at(-1).body.model, 'mock');
+});
+
+test('default standalone configuration discovers global OpenCode models', {timeout:60000}, async()=>{
+  const proxy = new OpenCodeBridge({...options,models:undefined,discoverModels:true});
+  try { const models=await proxy.loadModels(); assert.ok(models['fixture-api/mock']); assert.ok(models['fixture-oauth/mock']); }
+  finally { await proxy.close(); }
+});
+
+test('global workers share a configured directory while concurrent inference and cancellation remain isolated', { timeout: 90000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, workingDirectory, models: {
+    ...options.models,
+    'saved-api': { model: 'fixture-api/mock', context: 100000, output: 1000 },
+  } });
+  const labels = ['parallel-cancel', 'parallel-json', 'parallel-stream', 'parallel-oauth'];
+  parallelRequests = new Map(labels.map(label => [label, { started: Promise.withResolvers(), release: Promise.withResolvers() }]));
+  const controllers = labels.map(() => new AbortController());
+  const before = requests.length;
+  const beforeWorkers = (await observations()).length;
+  const jobs = labels.map(async (label, i) => {
+    const body = { model: i % 2 ? 'saved-api' : 'oc-default', messages: [{ role: 'user', content: label }], stream: i % 2 === 0, stream_options: { include_usage: true } };
+    const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify(body), signal: controllers[i].signal }, 'not-the-upstream-key');
+    if (i === 0 && controllers[0].signal.aborted) {
+      assert.equal(response.status, 499, 'Cancellation before first model output is an HTTP error');
+      assert.ok((await response.json()).error);
+      return { cancelled: true };
+    }
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    if (!body.stream) {
+      const result = await response.json();
+      return { content: result.choices[0].message.content, finish: result.choices[0].finish_reason, usage: result.usage };
+    }
+    const chunks = await Array.fromAsync(sseEvents(response.body));
+    if (i === 0 && controllers[0].signal.aborted) return { cancelled: true };
+    assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+    return { content: chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), finish: chunks.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, usage: chunks.at(-1).usage };
+  });
+  const settled = Promise.allSettled(jobs);
+  let deadline;
+  try {
+    const started = Promise.all([...parallelRequests.values()].map(p => p.started.promise));
+    const earlyFailure = Promise.all(jobs).then(() => { throw new Error('Workers completed before all four upstream calls overlapped'); });
+    const timedOut = new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('All four global workers must reach inference concurrently')), 45000); });
+    await Promise.race([started, earlyFailure, timedOut]);
+    assert.equal(requests.length, before + 4, 'All four inferences start before any result is released');
+    for (const [i, label] of labels.entries()) {
+      const upstreamRequest = requests.slice(before).find(r => r.body.messages.some(m => m.content === label));
+      assert.ok(upstreamRequest, label);
+      assert.equal(upstreamRequest.auth, i % 2 ? 'Bearer fixture-saved-api-key' : 'Bearer fixture-refreshed-access');
+    }
+    controllers[0].abort();
+    await jobs[0];
+    for (const label of labels) parallelRequests.get(label).release.resolve();
+    const results = await Promise.all(jobs);
+    for (let i = 1; i < results.length; i++) {
+      assert.equal(results[i].content, labels[i], 'Sessions must not receive another request\'s response');
+      assert.equal(results[i].finish, 'stop');
+      assert.equal(results[i].usage.total_tokens, 15);
+    }
+    assert.equal(refreshes, 1, 'Concurrent workers reuse the login already refreshed by OpenCode');
+    assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), originalConfig);
+    const auth = JSON.parse(await readFile(authFile, 'utf8'));
+    assert.equal(auth.untouched.key, 'fixture-unrelated-key');
+    assert.equal((await readdir(data)).some(n => n.endsWith('.sqlite')), false);
+    await instance.close();
+    const workers = (await observations()).slice(beforeWorkers);
+    assert.equal(new Set(workers.map(w => w.pid)).size, 4, 'All four requests have different OpenCode processes');
+    assert.equal(new Set(workers.map(w => w.db)).size, 4, 'Sharing cwd must not share session databases');
+    for (const worker of workers) {
+      assert.equal(await realpath(worker.cwd), await realpath(workingDirectory));
+      assert.equal(await realpath(worker.directory), await realpath(workingDirectory));
+      await assert.rejects(() => stat(worker.db), { code: 'ENOENT' });
+    }
+    assert.equal(await readFile(path.join(workingDirectory, 'keep.txt'), 'utf8'), 'user-owned workspace');
+    assert.equal(await readFile(path.join(workingDirectory, 'opencode.json'), 'utf8'), projectConfig);
+  } finally {
+    clearTimeout(deadline);
+    for (const controller of controllers) controller.abort();
+    for (const pending of parallelRequests.values()) pending.release.resolve();
+    await settled;
+    await instance.close();
+    parallelRequests = undefined;
+  }
+});
+
+test('regression: stream reasoning, text and usage with nonzero reasoning/cache totals', { timeout:60000 }, async () => {
+  const response=await request({messages:[{role:'user',content:'AUDIT_REASONING'}],stream:true,stream_options:{include_usage:true}});
+  assert.equal(response.status,200);
+  const chunks=await Array.fromAsync(sseEvents(response.body));
+  assert.equal(chunks.map(x=>x.choices?.[0]?.delta?.reasoning_content??'').join(''),'思考中。');
+  assert.equal(chunks.map(x=>x.choices?.[0]?.delta?.content??'').join(''),'结论。');
+  assert.equal(chunks.at(-1).usage.total_tokens,130);
+  assert.equal(chunks.at(-1).usage.completion_tokens,30);
+});
+
+test('regression: content_filter preserves normal JSON and SSE endings, with or without preceding text', { timeout: 60000 }, async () => {
+  for (const content of ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT']) for (const stream of [false, true]) {
+    const response = await request({ messages: [{ role: 'user', content }], stream });
+    assert.equal(response.status, 200);
+    if (stream) {
+      const chunks = await Array.fromAsync(sseEvents(response.body));
+      assert.equal(chunks.some(c => c.error), false);
+      assert.equal(chunks.at(-1).choices[0].finish_reason, 'content_filter');
+      assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? '').join(''), content.endsWith('_TEXT') ? 'Before filtering.' : '');
+    } else {
+      const result = await response.json();
+      assert.equal(result.choices[0].finish_reason, 'content_filter');
+    }
+  }
+});
+
+test('regression: environment-only global provider discovered must remain usable for inference', {timeout:60000},async()=>{
+  const old=process.env.OPENCODE_CONFIG_CONTENT;
+  process.env.OPENCODE_CONFIG_CONTENT=JSON.stringify({provider:{'audit-env':{npm:'@ai-sdk/openai-compatible',options:{baseURL:baseURL+'/v1',apiKey:'audit-fixture-key'},models:{mock:{limit:{context:100000,output:1000}}}}}});
+  try {
+    const bridge=new OpenCodeBridge({mode:'global',command,timeoutMs:15000,startupTimeoutMs:10000});
+    await bridge.loadModels();
+    assert.ok(bridge.config.models['audit-env/mock'],'environment-only provider is discovered');
+    const before=requests.length;
+    const response=await bridge.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'audit-env/mock',messages:[{role:'user',content:'Hello'}]})});
+    const result=await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(requests.length, before + 1);
+    assert.equal(requests.at(-1).auth, 'Bearer audit-fixture-key');
+  } finally {if(old===undefined)delete process.env.OPENCODE_CONFIG_CONTENT; else process.env.OPENCODE_CONFIG_CONTENT=old;}
+});
+
+test('regression: actual output limits return named client errors for both token fields and preserve valid boundaries', { timeout: 90000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, onFailure: undefined, models: { test: { model: 'fixture-api/mock', context: 100000, output: 10000 } } });
+  for (const field of ['max_tokens', 'max_completion_tokens']) for (const value of [999, 1000, 1001]) {
+    const before = requests.length;
+    const response = await instance.fetch('http://bridge/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'test', [field]: value, messages: [{ role: 'user', content: 'Hello' }] }) });
+    const result = await response.json();
+    assert.equal(response.status, value > 1000 ? 400 : 200, JSON.stringify(result));
+    if (value > 1000) {
+      assert.equal(result.error.param, field);
+      assert.equal(requests.length, before, 'Invalid output limits must not start upstream inference');
+    } else assert.equal(requests.at(-1).body.max_tokens, value);
+    assert.equal(instance.active, 0);
+  }
+});
+
+test('regression: allowed-prefix global local tool must not execute for API clients', {timeout:60000},async()=>{
+  const sentinel=path.join(home,'local-tool-executed.txt');
+  const customPlugin=path.join(configDir,'audit-local.mjs');
+  await writeFile(customPlugin,`import {writeFile} from 'node:fs/promises';
+export const AuditLocal=async()=>({tool:{bridge_audit_local:{description:'Audit fixture local tool',args:{},execute:async()=>{await writeFile(${JSON.stringify(sentinel)},'executed'); return 'local operation';}}}});`);
+  const modified={...globalConfig,plugin:[...globalConfig.plugin,pathToFileURL(customPlugin).href]};
+  await writeFile(path.join(configDir,'opencode.json'),JSON.stringify(modified));
+  try {
+    const tools = ['weather', 'clock'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object', properties: {} } } }));
+    const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
+    for (const extra of [{}, { tools, tool_choice: 'none' }, { tools }]) {
+      const response = await request({ messages: [{ role: 'user', content: 'AUDIT_LOCAL_TOOL' }], ...extra }, instance);
+      await response.json();
+      await delay(100);
+      assert.equal(await stat(sentinel).then(() => true, () => false), false, 'An unregistered local function was executed');
+      assert.ok(!requests.at(-1).body.tools?.some(t => t.function.name === 'bridge_audit_local'), 'Local tool must not be advertised');
+    }
+  } finally {await writeFile(path.join(configDir,'opencode.json'),originalConfig);}
+});
+
+test('short discovery IDs and legacy qualified IDs invoke the same real upstream', {timeout:60000}, async()=>{
+  const bridge=new OpenCodeBridge({...options,discoverModels:true});
+  await bridge.loadModels();
+  const id='DeepSeek-V4.1-Flash-line2-maas';
+  assert.ok(bridge.models().data.some(m=>m.id===id));
+  assert.ok(!bridge.models().data.some(m=>m.id==='fixture-api/'+id));
+  assert.ok(bridge.models().data.some(m=>m.id==='fixture-api/mock'));
+  assert.ok(bridge.models().data.some(m=>m.id==='fixture-oauth/mock'));
+  assert.ok(!bridge.models().data.some(m=>m.id==='mock'));
+  for(const model of [id,'fixture-api/'+id]){
+    const response=await bridge.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model,messages:[{role:'user',content:'Hello'}]})});
+    assert.equal(response.status,200,JSON.stringify(await response.json()));
+    assert.equal(requests.at(-1).body.model,id);
+    assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
+  }
+});
+
+
+test('audit12: client prompts replace global instructions, skills and plugin prompt edits', { timeout: 60000 }, async t => {
+  const noise = path.join(configDir, 'audit-noise.mjs');
+  const skillDir = path.join(configDir, 'skills', 'audit-skill');
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: audit-skill\ndescription: GLOBAL_SKILL_SENTINEL\n---\nGLOBAL_SKILL_BODY');
+  await writeFile(path.join(configDir, 'AGENTS.md'), 'GLOBAL_AGENTS_SENTINEL');
+  await writeFile(path.join(workingDirectory, 'AGENTS.md'), 'PROJECT_AGENTS_SENTINEL');
+  await writeFile(noise, `export const Noise = async () => ({
+    'experimental.chat.system.transform': async (_, out) => { out.system.push('PLUGIN_SYSTEM_SENTINEL'); },
+    'experimental.chat.messages.transform': async (_, out) => { out.messages[0].parts.push({ ...out.messages[0].parts[0], text: 'PLUGIN_MESSAGE_SENTINEL' }); },
+    'chat.params': async (_, out) => { out.temperature = 0.37; out.topP = 0.83; out.topK = 17; }
+  });`);
+  await writeFile(path.join(configDir, 'opencode.json'), JSON.stringify({ ...globalConfig, plugin: [...globalConfig.plugin, pathToFileURL(noise).href], instructions: [baseURL + '/audit-instructions'], skills: { urls: [baseURL + '/audit-skills'] } }));
+  try {
+    const instance = new OpenCodeBridge({ ...options, workingDirectory });
+    const response = await request({ messages: [{ role: 'system', content: 'CLIENT_SYSTEM_ONLY' }, { role: 'developer', content: 'CLIENT_DEVELOPER_ONLY' }, { role: 'user', content: 'CLIENT_USER_ONLY' }] }, instance);
+    assert.equal(response.status, 200, await response.text());
+    const sent = requests.at(-1).body;
+    assert.deepEqual(sent.messages.filter(m => m.role === 'system').map(m => m.content), ['CLIENT_SYSTEM_ONLY', 'CLIENT_DEVELOPER_ONLY']);
+    assert.equal(sent.messages.at(-1).content, 'CLIENT_USER_ONLY');
+    assert.doesNotMatch(JSON.stringify(sent), /GLOBAL_SKILL|GLOBAL_AGENTS|PROJECT_AGENTS|PLUGIN_SYSTEM|PLUGIN_MESSAGE|REMOTE_INSTRUCTION|Complete the current client request|Follow the client instructions/);
+    assert.deepEqual(sent.tools ?? [], []);
+    await t.test('discarded instructions do not fetch remote content', () => assert.equal(instructionFetches, 0));
+    await t.test('disabled skills do not fetch remote catalogs', () => assert.equal(skillFetches, 0));
+    await t.test('omitted sampling parameters preserve defaults', () => {
+      assert.equal(sent.temperature, 0.37);
+      assert.equal(sent.top_p, 0.83);
+    });
+    const override = await request({ messages: [{ role: 'user', content: 'explicit' }], temperature: 0.1, top_p: 0.6 }, instance);
+    assert.equal(override.status, 200, await override.text());
+    assert.equal(requests.at(-1).body.temperature, 0.1);
+    assert.equal(requests.at(-1).body.top_p, 0.6);
+  } finally { await writeFile(path.join(configDir, 'opencode.json'), originalConfig); }
+});
+
+test('audit12: reasoning and multiline Unicode code stream before completion without duplication', { timeout: 60000 }, async () => {
+  auditStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), tail: Array.from({ length: 40 }, (_, i) => 'print("第' + i + '行🙂")\n').concat('```') };
+  const response = await request({ messages: [{ role: 'user', content: 'AUDIT_INCREMENTAL' }], stream: true, stream_options: { include_usage: true } });
+  assert.equal(response.status, 200);
+  const chunks = [];
+  const firstText = Promise.withResolvers();
+  const consume = (async () => { for await (const chunk of sseEvents(response.body)) { chunks.push(chunk); if (chunk.choices?.[0]?.delta?.content) firstText.resolve(); } })();
+  let timer;
+  try {
+    await Promise.race([firstText.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Text was buffered until upstream completion')), 5000); })]);
+    assert.equal(chunks.some(c => c.choices?.[0]?.finish_reason), false);
+  } finally { clearTimeout(timer); auditStream.release.resolve(); }
+  await consume;
+  assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+  assert.equal(chunks.map(c => c.choices?.[0]?.delta?.reasoning_content ?? '').join(''), '思考。');
+  assert.equal(chunks.map(c => c.choices?.[0]?.delta?.content ?? '').join(''), '你好🙂\n\n```python\n' + auditStream.tail.join(''));
+  assert.ok(chunks.filter(c => c.choices?.[0]?.delta?.content).length > 10);
+  assert.equal(chunks.filter(c => c.choices?.[0]?.finish_reason === 'stop').length, 1);
+  assert.equal(chunks.at(-1).usage.total_tokens, 15);
+  assert.equal(bridge.active, 0);
+});
+
+test('audit12: discovered tool and sampling capabilities match native model metadata', { timeout: 60000 }, async () => {
+  const proxy = new OpenCodeBridge({...options,models:undefined,discoverModels:true});
+  try {
+    const models=await proxy.loadModels();
+    assert.equal(models['text-only'].toolcall,false);
+    assert.equal(models['text-only'].temperature,false);
+  } finally { await proxy.close(); }
+});
+
+
+test('reuse13: exclusive worker reuse resets request hooks and histories without extra inference', { timeout: 90000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, maxIdleWorkers: 1, onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  try {
+    for (const marker of ['REUSE_FIRST', 'REUSE_SECOND']) {
+      const response = await request({ messages: [{ role: 'system', content: marker + '_SYSTEM' }, { role: 'user', content: marker }], stream: true }, instance);
+      assert.equal(response.status, 200, response.status === 200 ? '' : await response.text());
+      const chunks = await Array.fromAsync(sseEvents(response.body));
+      assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
+      assert.equal(requests.at(-1).body.messages[0].content, marker + '_SYSTEM');
+      assert.equal(requests.at(-1).body.messages.at(-1).content, marker);
+      assert.ok(response.headers.get('x-opencode-request-id'));
+    }
+    assert.equal(requests.length, before + 2);
+    assert.equal(reports[0].workerReused, false);
+    assert.equal(new Set((await observations()).slice(-2).map(w => w.pid)).size, 1, 'Both completed requests must use the same real process');
+    assert.equal(reports[0].workerRetained, true);
+    assert.equal(reports[1].workerReused, true);
+    assert.equal(instance.pool.workers.size, 1);
+    const worker = [...instance.pool.workers][0];
+    const sessions = await fetch(worker.base + '/session', { headers: worker.headers }).then(r => r.json());
+    assert.deepEqual(sessions, [], 'Completed client sessions are deleted before returning the worker');
+    console.log(JSON.stringify({ reuse13: reports.map(r => ({ reused: r.workerReused, elapsedMs: r.elapsedMs, timings: r.timings })) }));
+  } finally { await instance.close(); }
+  assert.equal(instance.pool.workers.size, 0);
+});
+
+
+test('reuse13: prewarm never infers and reused workers replace tool schemas, history and permissions', { timeout: 90000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, warmupModels: ['oc-default'], onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  const tools = ['weather', 'clock'].map(name => ({type:'function',function:{name,parameters:{type:'object',properties:{city:{type:'string'}}}}}));
+  try {
+    await instance.prewarm();
+    assert.equal(requests.length, before, 'Prewarm must never start model inference');
+    assert.equal(reports[0].status, 'warmed');
+    assert.equal(instance.pool.idle.length, 1);
+    const response = await request({ messages: [{role:'user',content:'TOOLS_AFTER_PREWARM'}], tools }, instance);
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.deepEqual(result.choices[0].message.tool_calls.map(t => t.function.name), ['weather','clock']);
+    assert.equal(reports.at(-1).workerReused, true);
+    const second = await request({ messages: [{role:'user',content:'NO_TOOLS_NEXT'}], tool_choice:'none', tools }, instance);
+    assert.equal(second.status, 200, await second.text());
+    assert.deepEqual(requests.at(-1).body.tools ?? [], []);
+    assert.equal(reports.at(-1).workerReused, true);
+    assert.equal(requests.length, before + 2, 'Tool deferral must not start a hidden continuation');
+    assert.equal(instance.pool.workers.size, 1);
+    const pooled = [...instance.pool.workers][0];
+    await assert.rejects(() => stat(pooled.requestFile), { code: 'ENOENT' });
+    await assert.rejects(() => stat(pooled.hookFile), { code: 'ENOENT' });
+  } finally { await instance.close(); }
+});
+
+test('reuse13: first-output and idle failures ignore vendor heartbeats and discard the worker', { timeout: 90000 }, async () => {
+  for (const [marker, expected] of [['TIMEOUT_FIRST','first_output'], ['TIMEOUT_IDLE','idle']]) {
+    const reports = [];
+    const instance = new OpenCodeBridge({ ...options, workerReuse: true, timeoutMs: 0, firstOutputTimeoutMs: 5000, idleTimeoutMs: 400, onFailure: undefined, onDiagnostics: r => reports.push(r) });
+    const before = requests.length;
+    try {
+      const response = await request({ messages:[{role:'user',content:marker}],stream:true }, instance);
+      const result = response.status === 200 ? (await Array.fromAsync(sseEvents(response.body))).find(c=>c.error) : await response.json();
+      assert.equal(response.status, expected === 'first_output' ? 504 : 200, JSON.stringify(result));
+      assert.equal(result.error.code, 'opencode_timeout');
+      assert.ok(result.error.message.includes(expected), result.error.message);
+      assert.equal(requests.length, before + 1);
+      assert.equal(reports.at(-1).timeoutKind, expected);
+      assert.equal(instance.pool.workers.size, 0);
+      assert.equal(instance.active, 0);
+      assert.equal(JSON.stringify(reports).includes(marker), false, 'Diagnostics must not log prompt content');
+      assert.equal(JSON.stringify(reports).includes('fixture-refreshed-access'), false);
+    } finally { await instance.close(); }
+  }
+});
+
+test('reuse13: idle expiry retires the process and removes its temporary database', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workerReuse:true, workerIdleMs:200 });
+  try {
+    const response = await request({ messages:[{role:'user',content:'EXPIRING'}] },instance);
+    assert.equal(response.status,200,await response.text());
+    const worker = [...instance.pool.workers][0];
+    assert.ok(worker);
+    await delay(800);
+    assert.equal(instance.pool.workers.size,0);
+    await assert.rejects(() => stat(worker.home),{code:'ENOENT'});
+  } finally {await instance.close();}
+});
+
+test('reuse13: an idle worker that exited by signal is replaced before inference', { timeout: 60000 }, async () => {
+  const reports = [];
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, onDiagnostics: r => reports.push(r) });
+  const before = requests.length;
+  try {
+    const first = await request({ messages: [{ role: 'user', content: 'BEFORE_EXIT' }] }, instance);
+    assert.equal(first.status, 200, await first.text());
+    const prior = [...instance.pool.workers][0];
+    prior.child.kill();
+    await prior.worker.done;
+    const next = await request({ messages: [{ role: 'user', content: 'AFTER_EXIT' }] }, instance);
+    assert.equal(next.status, 200, await next.text());
+    assert.equal(reports.at(-1).workerReused, false);
+    assert.notEqual([...instance.pool.workers][0].child.pid, prior.child.pid);
+    assert.equal(requests.length, before + 2);
+  } finally { await instance.close(); }
+});
+
+test('reuse13: a slow downstream reader does not idle-timeout an upstream that has completed', { timeout: 60000 }, async () => {
+  const instance = new OpenCodeBridge({ ...options, workerReuse: true, timeoutMs: 0, idleTimeoutMs: 700, firstOutputTimeoutMs: 5000, onFailure: undefined });
+  auditStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), tail: Array.from({length:40},(_,i)=>'line '+i+'\n') };
+  try {
+    const response = await request({ messages:[{role:'user',content:'AUDIT_INCREMENTAL'}],stream:true },instance);
+    assert.equal(response.status,200);
+    await auditStream.started.promise;
+    auditStream.release.resolve();
+    await delay(1500); // Do not consume the body while the upstream completes.
+    const chunks = await Array.fromAsync(sseEvents(response.body));
+    assert.equal(chunks.some(c=>c.error),false,JSON.stringify(chunks));
+    assert.equal(chunks.at(-1).choices[0].finish_reason,'stop');
+    assert.equal(chunks.map(c=>c.choices[0]?.delta?.content??'').join(''),'你好🙂\n\n```python\n'+auditStream.tail.join(''));
+  } finally {auditStream.release.resolve();await instance.close();}
+});

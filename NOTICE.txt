@@ -1,0 +1,5 @@
+OpenCode Proxy derives from the OpenCode bridge core at
+https://github.com/xshu-hub/magpie/tree/210234a5f33e0f2643f82b4337e249cf0fe81371/addons/opencode-bridge
+Original bridge version: 0.13.0.
+Retains the original MIT license and copyright notice.
+This repository contains no Magpie application or plugin adapter.

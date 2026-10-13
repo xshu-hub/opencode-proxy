@@ -1,0 +1,92 @@
+name: OpenCode Proxy build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      compatibility:
+        description: Run real OpenCode integration tests on Windows/Linux
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-proxy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: Package standalone tool
+        run: |
+          mkdir -p artifacts
+          npm pack --ignore-scripts --pack-destination artifacts
+          cp README.md config.example.json LICENSE artifacts/
+          node -e 'const fs=require("fs"),crypto=require("crypto"),path=require("path");fs.writeFileSync("artifacts/SHA256SUMS",fs.readdirSync("artifacts").map(n=>crypto.createHash("sha256").update(fs.readFileSync(path.join("artifacts",n))).digest("hex")+"  "+n).join("\n")+"\n")'
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: opencode-proxy
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+  compatibility:
+    if: github.event_name == 'workflow_dispatch' && inputs.compatibility
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            opencode: 1.18.35
+          - os: windows-latest
+            platform: windows-x64
+            opencode: 1.18.35
+          - os: ubuntu-latest
+            platform: linux-x64
+            opencode: 1.16.2
+          - os: windows-latest
+            platform: windows-x64
+            opencode: 1.16.2
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install bridge dependencies and the compatibility-test runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@${{ matrix.opencode }} @opencode-ai/plugin@${{ matrix.opencode }}
+          node -e 'const fs=require("fs"),path=require("path"); const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json")); const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\nTEST_OPENCODE_VERSION="+pkg.version+"\n")'
+      - name: Unit and real OpenCode tests
+        run: |
+          npm test
+          npm run test:integration
