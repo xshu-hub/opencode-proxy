@@ -13,7 +13,7 @@ import {Telemetry} from '../lib/telemetry.mjs';
 
 const config=()=>({mode:'global',host:'127.0.0.1',port:0,diagnostics:false,apiKeys:[{id:'test',name:'测试客户端',key:'fixture-access-key',enabled:true}],modelOverrides:{}});
 class Bridge{
-  constructor(config){this.config=config;this.config.models={mock:{model:'fixture/mock',name:'模型',context:100000,output:1000}};this.acceptedModels={'fixture/mock':this.config.models.mock,...this.config.models};}
+  constructor(config){this.config=config;this.config.models={mock:{model:'fixture/mock',name:'模型',context:100000,output:1000,reasoning:true,reasoningEfforts:['low','high']}};this.acceptedModels={'fixture/mock':this.config.models.mock,...this.config.models};}
   async loadModels(){return this.config.models;}
   async close(){this.closed=true;}
   async fetch(_url,init){const body=JSON.parse(init.body);this.body=body;this.config.onDiagnostics({requestId:init.requestId,status:'completed',timings:{catalogMs:0,firstModelEvent:10,completion:1010},usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}},tokens:{input:10,output:6,reasoning:2,cache:{read:5,write:0}}});return Response.json({id:'test',choices:[{message:{content:'fixture answer'},finish_reason:'stop'}],usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}}});}
@@ -51,6 +51,21 @@ test('Magpie reasoning/TTFT/speed samples match the original ledger regression c
   assert.equal(ledDecode({status:200,out:200,ms:5000,ttft_ms:1000,flow_ms:100}),null);
   assert.equal(flowMs([{at:1000,sum:10},{at:1100,sum:20},{at:1900,sum:90},{at:2000,sum:100}],1000),1125);
 });
+test('model switches reject new calls on all protocols and qualification cannot bypass aliases/defaults',async()=>fixture(async({runtime})=>{
+  await runtime.updateModel('fixture/mock',{alias:'friendly',defaults:{temperature:0.4,reasoning_effort:'high'}});
+  const response=await runtime.fetch('http://proxy/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'fixture/mock',messages:[{role:'user',content:'hello'}]})});await response.text();assert.equal(runtime.current.bridge.body.temperature,0.4);assert.equal(runtime.current.bridge.body.reasoning_effort,'high');
+  await runtime.updateModel('fixture/mock',{enabled:false});assert.equal((await runtime.models())[0].enabled,false);assert.deepEqual(Object.keys(runtime.current.bridge.config.models),[]);
+  for(const [route,body] of [['chat/completions',{model:'friendly',messages:[{role:'user',content:'hi'}]}],['responses',{model:'fixture/mock',input:'hi'}],['messages',{model:'friendly',messages:[{role:'user',content:'hi'}],max_tokens:20}]]){
+    const rejected=await runtime.fetch('http://proxy/v1/'+route,{method:'POST',body:JSON.stringify(body)});assert.equal(rejected.status,403);assert.match(JSON.stringify(await rejected.json()),/停用/);
+  }
+  await runtime.updateModel('fixture/mock',{enabled:true});assert.equal((await runtime.models())[0].enabled,true);assert.equal(runtime.settings.modelOverrides['fixture/mock'].defaults.reasoning_effort,'high');
+}));
+test('concurrent model updates merge and native reasoning choices validate before persistence',async()=>fixture(async({runtime,directory})=>{
+  await Promise.all([runtime.updateModel('fixture/mock',{enabled:false}),runtime.updateModel('fixture/mock',{defaults:{temperature:0.5,reasoning_effort:'low'}})]);
+  const m=(await runtime.models())[0];assert.equal(m.enabled,false);assert.equal(m.defaults.temperature,0.5);assert.equal(m.defaults.reasoning_effort,'low');
+  const before=await readFile(path.join(directory,'config.json'),'utf8');await assert.rejects(()=>runtime.updateModel('fixture/mock',{defaults:{reasoning_effort:'xhigh'}}),e=>e.code==='unsupported_reasoning_effort');assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),before);
+  await runtime.updateModel('fixture/mock',{defaults:{reasoning_effort:null}});assert.equal((await runtime.models())[0].defaults.reasoning_effort,undefined);assert.equal((await runtime.models())[0].defaults.temperature,0.5);
+}));
 test('statistics persist, failed/cancelled requests do not influence Magpie speed and failed includes cancellation',async()=>{
   const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-proxy-stats-'));try{const telemetry=new Telemetry(path.join(directory,'statistics.json'));await telemetry.load();const id=randomUUID();telemetry.begin({id,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-7000,stream:true,clientFirstMs:2000,usage:{prompt_tokens:10,completion_tokens:500}});telemetry.finish(id,{httpStatus:200});await telemetry.close();assert.equal(telemetry.totals.generationTokens,500);assert.ok(telemetry.totals.generationMs>=5000);const cancelled=randomUUID();telemetry.begin({id:cancelled,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-5000,stream:true,clientFirstMs:1000,cancelled:true});telemetry.finish(cancelled,{httpStatus:499});await telemetry.close();const restored=new Telemetry(telemetry.file);await restored.load();assert.equal(restored.totals.requests,2);assert.equal(restored.totals.failed,1);assert.equal(restored.totals.cancelled,1);assert.equal(restored.totals.ttftSamples,1);}finally{await rm(directory,{recursive:true,force:true});}
 });

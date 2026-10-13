@@ -2,7 +2,8 @@ OpenCode Proxy derives from the OpenCode bridge core at
 https://github.com/xshu-hub/magpie/tree/210234a5f33e0f2643f82b4337e249cf0fe81371/addons/opencode-bridge
 Original bridge version: 0.13.0.
 Retains the original MIT license and copyright notice.
-This repository contains no Magpie application or plugin adapter.
+This repository contains no Magpie backend application or plugin adapter.
 
-The UI reuses/adapts Magpie app.css tokens and ledger strip styles.
+The frontend directly reuses Magpie app.css, opencode.svg, HTML header/list/ledger structure and selected app.js DOM controls (including the model switch and effort slider/pointer/keyboard logic). library.css switch rules are retained. Unrelated pages and original Magpie/Wails runtime/API calls are removed; the UI calls the standalone OpenCode Proxy management API.
+Source metadata and checksums: frontend/src/magpie/SOURCE.json. Refresh script: scripts/vendor-magpie.mjs. Original MIT notice retained.
 The metric rules ledDecode/ledRowSpeed and flowMs derive from Magpie app.js, gateway/ttft.go, and usage/usage.go at the same source commit. All retain the original MIT notice.

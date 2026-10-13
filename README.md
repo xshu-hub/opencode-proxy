@@ -5,6 +5,9 @@
 独立的 OpenCode 反代工具，带 Windows EXE 客户端和 Linux 服务端。
 客户端 → OpenCode Proxy → 真实全局 OpenCode → 已配置的上游供应商。
 
+0.3.0 前端直接从 Magpie HTML/CSS/JavaScript 精简适配，移除 Vue/Naive UI 和无关页面；复用顶部导航、模型列表、开关、思考强度滑块/键盘操作和日志布局。复用源码与许可记录见 NOTICE.txt。
+模型开关和默认思考强度即时保存；停用模型从 `/v1/models` 隐藏，短名、别名及原生完整 ID 的新请求均返回 403，三种协议一致。已运行的请求继续完成。支持按供应商分组、启用状态筛选、搜索和批量启停。
+
 ## Windows 客户端
 
 下载 Windows 压缩包并完整解压，双击 `opencode-proxy.exe`。同目录中的服务 EXE 和 resources 必须保留。无需另外安装 Node.js 或 Bun；仍需要已安装、能够正常对话的全局 OpenCode，以及 Windows WebView2 运行时。
