@@ -88,6 +88,7 @@ function proxyResetModel(m){draft.proxyUpdates[m.raw.target]={context:null,outpu
 gatewayModels=function(){return providers.providers.flatMap(p=>p.models.filter(m=>m.on).map(m=>({id:m.id,name:m.name,provider:p,context:m.context,output:m.output,efforts:m.efforts,images:false})));};
 for(const k of Object.keys(FLAVORS))if(!['openai','responses','anthropic'].includes(k))delete FLAVORS[k];
 FLAVORS.responses.note='Responses 接口：文本、思考和客户端函数工具。会话历史由客户端传入。';
+FLAVORS.anthropic.note='Messages 接口：文本、思考和客户端函数工具。Claude Code 请手动设置 ANTHROPIC_AUTH_TOKEN 为网关 Key。';
 if(!FLAVORS[flavor])flavor='openai';
 const proxyRenderGateway=renderGateway;
 renderGateway=function(){proxyRenderGateway();$('#gateway .sub').textContent=proxyModels.filter(m=>m.enabled).length+' 个模型 · 三种 API · 由全局 OpenCode 推理';if(!proxyState.running)return;const stop=el('button','text action','停止网关');stop.onclick=async()=>{stop.disabled=true;try{await proxyRequest('/admin/stop',{});await proxyRead();renderGatewayView();}catch(e){status(e.message,'err');stop.disabled=false;}};$('#gateway .who').append(stop);};
