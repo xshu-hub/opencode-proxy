@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,11 +43,62 @@ type Desktop struct {
 	mu         sync.Mutex
 	adminURL   string
 	startError string
+	tray       *nativeTray
+	trayError  string
+	trayReady  chan struct{}
+	quitting   atomic.Bool
 }
 
 func (d *Desktop) startup(ctx context.Context) {
 	d.ctx = ctx
+	tray, err := newNativeTray(d.ShowWindow, d.Quit)
+	if err != nil {
+		d.trayError = err.Error()
+	} else {
+		d.tray = tray
+	}
+	close(d.trayReady)
 	go d.startBackend()
+}
+
+func (d *Desktop) ShowWindow() { runtime.WindowShow(d.ctx); runtime.WindowUnminimise(d.ctx) }
+func (d *Desktop) HideToTray() error {
+	<-d.trayReady
+	if d.tray == nil {
+		return fmt.Errorf("托盘不可用，无法隐藏窗口。")
+	}
+	runtime.WindowHide(d.ctx)
+	return nil
+}
+func (d *Desktop) Quit() { d.quitting.Store(true); runtime.Quit(d.ctx) }
+func (d *Desktop) DesktopInfo() map[string]interface{} {
+	<-d.trayReady
+	return map[string]interface{}{"trayAvailable": d.tray != nil, "trayError": d.trayError}
+}
+func (d *Desktop) beforeClose(context.Context) bool {
+	<-d.trayReady
+	if !d.quitting.Load() && d.tray != nil {
+		runtime.WindowHide(d.ctx)
+		return true
+	}
+	return false
+}
+func (d *Desktop) domReady(context.Context) {
+	for _, arg := range os.Args[1:] {
+		if arg == "--background" || arg == "tray" {
+			_ = d.HideToTray()
+			return
+		}
+	}
+}
+
+func (d *Desktop) secondInstance(data options.SecondInstanceData) {
+	for _, arg := range data.Args {
+		if arg == "--background" || arg == "tray" {
+			return
+		}
+	}
+	d.ShowWindow()
 }
 
 func (d *Desktop) startBackend() {
@@ -162,6 +214,8 @@ func (d *Desktop) SelectExecutable() (string, error) {
 func (d *Desktop) CopyText(text string) error { return runtime.ClipboardSetText(d.ctx, text) }
 
 func (d *Desktop) shutdown(context.Context) {
+	<-d.trayReady
+	d.tray.close()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.backend == nil || d.backend.Process == nil {
@@ -188,9 +242,9 @@ func main() {
 	if _, err := rand.Read(secret); err != nil {
 		panic(err)
 	}
-	app := &Desktop{token: hex.EncodeToString(secret), ready: make(chan struct{}), done: make(chan error, 1)}
+	app := &Desktop{token: hex.EncodeToString(secret), ready: make(chan struct{}), done: make(chan error, 1), trayReady: make(chan struct{})}
 	assets, _ := fs.Sub(frontend, "ui")
-	err := wails.Run(&options.App{Title: "OpenCode Proxy", Width: 1240, Height: 840, MinWidth: 800, MinHeight: 600, BackgroundColour: options.NewRGB(244, 244, 246), AssetServer: &assetserver.Options{Assets: assets}, OnStartup: app.startup, OnShutdown: app.shutdown, Bind: []interface{}{app}, Windows: &windows.Options{WebviewUserDataPath: filepath.Join(os.TempDir(), "OpenCodeProxyWebView"), Theme: windows.SystemDefault}, SingleInstanceLock: &options.SingleInstanceLock{UniqueId: "bdd44f35-e7ee-4b82-b49c-427b098e4e3d", OnSecondInstanceLaunch: func(options.SecondInstanceData) { runtime.WindowShow(app.ctx); runtime.WindowUnminimise(app.ctx) }}})
+	err := wails.Run(&options.App{Title: "OpenCode Proxy", Width: 1240, Height: 840, MinWidth: 800, MinHeight: 600, BackgroundColour: options.NewRGB(244, 244, 246), AssetServer: &assetserver.Options{Assets: assets}, OnStartup: app.startup, OnDomReady: app.domReady, OnBeforeClose: app.beforeClose, OnShutdown: app.shutdown, Bind: []interface{}{app}, Windows: &windows.Options{WebviewUserDataPath: filepath.Join(os.TempDir(), "OpenCodeProxyWebView"), Theme: windows.SystemDefault}, SingleInstanceLock: &options.SingleInstanceLock{UniqueId: "bdd44f35-e7ee-4b82-b49c-427b098e4e3d", OnSecondInstanceLaunch: app.secondInstance}})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}

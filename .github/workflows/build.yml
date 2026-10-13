@@ -47,6 +47,9 @@ jobs:
       - run: npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
       - run: npm run build:ui
       - run: npm test
+      - name: Verify native Windows tray
+        if: runner.os == 'Windows'
+        run: go test desktop/tray_windows.go desktop/tray_windows_test.go
       - name: Build standalone client and server
         run: node scripts/package.mjs $PLATFORM
         env:
@@ -60,9 +63,9 @@ jobs:
       - name: Archive standalone application
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.3.0-windows-x64.zip'
+            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.4.0-windows-x64.zip'
           else
-            tar -czf dist/opencode-proxy-0.3.0-linux-x64.tar.gz -C dist/linux .
+            tar -czf dist/opencode-proxy-0.4.0-linux-x64.tar.gz -C dist/linux .
           fi
       - uses: actions/upload-artifact@v4
         with:

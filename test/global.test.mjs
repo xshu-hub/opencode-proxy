@@ -367,6 +367,9 @@ test('native SDK reasoning uses OpenCode thinking options and unmappable request
   assert.deepEqual(requests.at(-1).body.thinking, { type: 'enabled', budget_tokens: 1024 });
   assert.equal(requests.at(-1).body.reasoning_effort, undefined, 'Native Anthropic must not receive an OpenAI field');
   assert.equal(requests.at(-1).apiKey, 'fixture-native-api-key');
+  selected.acceptedModels['native-thinking'].reasoningVariants={high:{thinking:{type:'enabled',budgetTokens:2048}}};
+  const custom=await send('native-thinking');assert.equal(custom.status,200,custom.status===200?'':await custom.text());await Array.fromAsync(sseEvents(custom.body));
+  assert.deepEqual(requests.at(-1).body.thinking,{type:'enabled',budget_tokens:2048});
   const before = requests.length;
   const rejected = await send('no-reasoning');
   const error = (await rejected.json()).error;
@@ -867,11 +870,16 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     const preference=await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{defaults:{reasoning_effort:'high'}}});assert.equal(preference.status,200);
     const sendEffort=async effort=>{const body={model:'native-variants',messages:[{role:'user',content:'Hello'}],...(effort?{reasoning_effort:effort}:{})};const reply=await fetch(state.endpoint+'/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,200,await(reply.status===200?Promise.resolve(''):reply.text()));await reply.text();};
     await sendEffort();assert.equal(requests.at(-1).body.reasoning_effort,'high');assert.deepEqual(requests.at(-1).body.fixture_nested,{keep:'base',choose:'native-high'});await sendEffort('low');assert.equal(requests.at(-1).body.reasoning_effort,'low');
+    const customMapping={high:{reasoningEffort:'max',fixture_nested:{choose:'custom-high'}}};
+    assert.equal((await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{reasoningVariants:customMapping}})).status,200);
+    for(const [route,body] of [['chat/completions',{model:'native-variants',messages:[{role:'user',content:'Custom reasoning'}]}],['responses',{model:'native-variants',input:'Custom reasoning',reasoning:{effort:'high'}}],['messages',{model:'native-variants',max_tokens:100,messages:[{role:'user',content:'Custom reasoning'}],thinking:{type:'adaptive'},output_config:{effort:'high'}}]]){
+      const reply=await fetch(state.endpoint+'/'+route,{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,200,reply.status===200?'':await reply.text());await reply.text();assert.equal(requests.at(-1).body.reasoning_effort,'max');assert.deepEqual(requests.at(-1).body.fixture_nested,{keep:'base',choose:'custom-high'});
+    }
     assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:false}})).status,200);
     const apiModels=await(await fetch(state.endpoint+'/models',{headers:{authorization:'Bearer fixture-client-access-key'}})).json();assert.equal(apiModels.data.some(m=>m.id==='desktop-model'),false);const hiddenAdmin=(await(await admin('/admin/models')).json()).models.find(m=>m.target==='fixture-api/mock');assert.equal(hiddenAdmin.enabled,false);
     const callsBefore=requests.length;
     for(const [route,body] of [['chat/completions',{model:'desktop-model',messages:[{role:'user',content:'blocked'}]}],['responses',{model:'fixture-api/mock',input:'blocked'}],['messages',{model:'desktop-model',max_tokens:100,messages:[{role:'user',content:'blocked'}]}]]){const reply=await fetch(state.endpoint+'/'+route,{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,403);await reply.text();}
     assert.equal(requests.length,callsBefore,'Disabled model requests never reach OpenCode inference');
-    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,10);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'high');assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
+    await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal(restarted.statistics.totals.requests,13);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'high');assert.deepEqual(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningVariants,customMapping);assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
   }finally{await stop();}
 });

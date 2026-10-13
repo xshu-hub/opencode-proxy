@@ -66,6 +66,15 @@ test('concurrent model updates merge and native reasoning choices validate befor
   const before=await readFile(path.join(directory,'config.json'),'utf8');await assert.rejects(()=>runtime.updateModel('fixture/mock',{defaults:{reasoning_effort:'xhigh'}}),e=>e.code==='unsupported_reasoning_effort');assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),before);
   await runtime.updateModel('fixture/mock',{defaults:{reasoning_effort:null}});assert.equal((await runtime.models())[0].defaults.reasoning_effort,undefined);assert.equal((await runtime.models())[0].defaults.temperature,0.5);
 }));
+
+test('custom mappings extend native choices and clearing them validates default selection atomically',async()=>fixture(async({runtime,directory})=>{
+  await runtime.updateModel('fixture/mock',{reasoningVariants:{max:{reasoningEffort:'max'}},defaults:{reasoning_effort:'max'}});
+  const model=(await runtime.models())[0];assert.deepEqual(model.reasoningEfforts,['low','high','max']);assert.deepEqual(model.customReasoningEfforts,['max']);
+  assert.equal(runtime.current.bridge.acceptedModels['fixture/mock'].reasoningVariants.max.reasoningEffort,'max');
+  const saved=await readFile(path.join(directory,'config.json'),'utf8');
+  await assert.rejects(()=>runtime.updateModel('fixture/mock',{reasoningVariants:{}}),e=>e.code==='unsupported_reasoning_effort');assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),saved);
+  await runtime.updateModel('fixture/mock',{reasoningVariants:null,defaults:{reasoning_effort:null}});assert.deepEqual((await runtime.models())[0].customReasoningEfforts,[]);assert.deepEqual((await runtime.models())[0].reasoningEfforts,['low','high']);
+}));
 test('statistics persist, failed/cancelled requests do not influence Magpie speed and failed includes cancellation',async()=>{
   const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-proxy-stats-'));try{const telemetry=new Telemetry(path.join(directory,'statistics.json'));await telemetry.load();const id=randomUUID();telemetry.begin({id,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-7000,stream:true,clientFirstMs:2000,usage:{prompt_tokens:10,completion_tokens:500}});telemetry.finish(id,{httpStatus:200});await telemetry.close();assert.equal(telemetry.totals.generationTokens,500);assert.ok(telemetry.totals.generationMs>=5000);const cancelled=randomUUID();telemetry.begin({id:cancelled,model:'m',startedAt:new Date().toISOString(),startedMs:Date.now()-5000,stream:true,clientFirstMs:1000,cancelled:true});telemetry.finish(cancelled,{httpStatus:499});await telemetry.close();const restored=new Telemetry(telemetry.file);await restored.load();assert.equal(restored.totals.requests,2);assert.equal(restored.totals.failed,1);assert.equal(restored.totals.cancelled,1);assert.equal(restored.totals.ttftSamples,1);}finally{await rm(directory,{recursive:true,force:true});}
 });
