@@ -7,6 +7,7 @@ import './magpie/switch.css';
 import './proxy.css';
 import {el,svg,effortIcon,effortName,effortSeg,providerSwitch} from './magpie/controls.js';
 import {api,copy,desktop} from './api.js';
+import {initialThinkingChoice} from './thinking-choice.js';
 
 const $=s=>document.querySelector(s),clone=v=>JSON.parse(JSON.stringify(v)),same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const number=n=>Number.isFinite(n)?new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(n):'—';
@@ -66,9 +67,7 @@ function editModel(m){
   const add=(key,label,type,hint,attrs,value)=>{const f=field(label,value,type,hint,attrs);fields[key]=f.input;form.append(f.box);};
   add('alias','模型别名','text','留空恢复自动模型名',{maxlength:128,placeholder:m.target.split('/').slice(1).join('/')},original.alias??'');add('context','上下文上限','number','原生 '+number(m.nativeContext),{min:1,max:m.nativeContext},original.context);add('output','最大输出','number','原生 '+number(m.nativeOutput),{min:1,max:m.nativeOutput},original.output);
   add('temperature','默认 temperature','number','客户端未指定时生效',{min:0,max:2,step:'any',disabled:!m.temperature?'disabled':undefined},original.defaults?.temperature);if(m.temperature)fields.temperature.removeAttribute('disabled');add('top_p','默认 top_p','number','0–1',{min:0,max:1,step:'any'},original.defaults?.top_p);add('max_tokens','默认 max_tokens','number','不超过最大输出上限',{min:1,max:m.output},original.defaults?.max_tokens);
-  let selectedEffort=original.defaults?.reasoning_effort??'',preset=clone(original.reasoningPreset??{type:'native'}),preserveLegacy=!!original.reasoningVariants&&!original.reasoningPreset;
-  const legacy=original.reasoningVariants??{},legacyLevels=Object.keys(legacy);
-  if(preserveLegacy&&m.reasoningAdapter==='effort'&&legacyLevels.every(e=>Object.keys(legacy[e]).length===1&&legacy[e].reasoningEffort===e)){preset={type:'effort',levels:legacyLevels};preserveLegacy=false;}
+  let selectedEffort=original.defaults?.reasoning_effort??'';let {preset,preserveLegacy}=initialThinkingChoice(m,original);
   const effortBox=el('div','setting-row'),choices=el('div','segs effort-choices');effortBox.append(el('span','','默认思考强度'),choices);form.append(effortBox);
   const configure=el('details','reasoning-custom');configure.open=preset.type!=='native'||preserveLegacy;configure.append(el('summary','','配置可选思考档位'));const modes=el('div','segs'),levels=el('div','thinking-levels'),note=el('p','usage-note','程序按 OpenCode SDK 自动处理参数。自定义档位是否被模型接受由上游决定。');configure.append(modes,levels,note);form.append(configure);
   const selected=new Set(preset.levels??['low','medium','high']),budgets={low:1024,medium:4096,high:8192,xhigh:16384,max:32768,minimal:1024,...preset.budgets};for(const e of Object.keys(budgets))budgets[e]=Math.max(1024,Math.min(budgets[e],m.output-1));
