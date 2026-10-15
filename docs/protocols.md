@@ -41,19 +41,26 @@ Anthropic-verifiable signature. Thinking tokens still count in actual usage.
 Signed thinking history and fixed thinking budgets are explicitly unsupported.
 `cache_control` blocks are accepted as client hints, but provider caching remains
 controlled by OpenCode; the gateway does not promise Anthropic cache breakpoints.
-Metadata is retained in request logs/Responses metadata and is not forwarded as
-supplier inference options. Responses summary preferences do not control the
-provider's reasoning text length.
+Responses metadata is echoed in the response; Anthropic metadata is accepted but
+not forwarded. Neither is sent as supplier inference options or retained in
+request logs. Responses summary preferences do not control the provider's
+reasoning text length.
 
 Usage: OpenAI prompt totals include cached tokens. Anthropic separates ordinary
-input, cache reads and cache creation. Output totals include reasoning. The UI
-uses native OpenCode usage and Magpie's metrics, regardless of outward protocol;
-TTFT measures the first actual content/tool delta visible to that client.
+input, cache reads and cache creation. Output totals include reasoning. Actual
+usage reported by OpenCode is still forwarded in responses.
+
+The gateway does not collect persistent statistics or retain prompts, tool
+arguments, or raw requests/responses as request logs. Existing statistics files
+and request records are neither read nor deleted. Necessary process errors and
+optional diagnostics may still be written to the terminal. The Windows desktop
+app redirects the service's standard error output to `desktop.log` in the
+configuration directory for troubleshooting. The management UI has no statistics,
+request-log or effective-request views.
+
 Stream-start envelopes and heartbeats do not count as first output. Partial
 stream errors emit the protocol's error event and never a successful completion.
-Downstream cancellation cancels the OpenCode request. Raw logs retain the outward
-response bytes and original request; the effective request tab shows normalized
-Chat format with model defaults, not final supplier HTTP bytes.
+Downstream cancellation cancels the OpenCode request.
 
 Reference event contracts:
 - https://developers.openai.com/api/reference/resources/responses/streaming-events
