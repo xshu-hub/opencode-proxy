@@ -33,6 +33,25 @@ test('model aliases/defaults, key changes survive atomic save without killing ac
   assert.equal('statistics' in runtime.state(),false);assert.deepEqual((await readdir(directory)).sort(),['config.json']);
   await runtime.release(old);assert.equal(old.bridge.closed,true);
 }));
+test('stale model overrides do not block the catalog and return when OpenCode lists the model again',async()=>fixture(async({runtime,base,directory})=>{
+  const retired={alias:'retired-short',enabled:false,output:500,defaults:{temperature:0.6}};
+  await runtime.save({...runtime.settings,modelOverrides:{'fixture/retired':retired,'fixture/mock':{alias:'friendly',defaults:{temperature:0.4}}}});
+  const saved=await readFile(path.join(directory,'config.json'),'utf8');
+  const response=await fetch(base+'/admin/models',{headers:{authorization:'Bearer fixture-admin-key'}});
+  assert.equal(response.status,200);
+  const {models}=await response.json();assert.deepEqual(models.map(m=>m.id),['friendly']);
+  assert.equal(models[0].defaults.temperature,0.4);assert.equal(runtime.current.bridge.acceptedModels['fixture/retired'],undefined);
+  await assert.rejects(()=>runtime.updateModel('fixture/retired',{enabled:true}),e=>e.code==='model_not_found');
+  await runtime.refresh();assert.deepEqual(runtime.settings.modelOverrides['fixture/retired'],retired);
+  assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),saved);
+  runtime.Bridge=class extends Bridge{
+    constructor(config){super(config);const model={model:'fixture/retired',name:'返回的模型',context:100000,output:1000};this.config.models.retired=model;this.acceptedModels.retired=model;this.acceptedModels['fixture/retired']=model;}
+  };
+  const restored=(await runtime.refresh()).find(m=>m.target==='fixture/retired');
+  assert.equal(restored.id,'retired-short');assert.equal(restored.enabled,false);assert.equal(restored.output,500);assert.equal(restored.defaults.temperature,0.6);
+  assert.equal(await readFile(path.join(directory,'config.json'),'utf8'),saved);
+}));
+
 test('model validation rejects conflicting aliases and invalid defaults before persistence',async()=>fixture(async({runtime,directory})=>{
   await assert.rejects(()=>runtime.save({...runtime.settings,modelOverrides:{'fixture/mock':{output:2000}}}),e=>e.code==='model_limit');
   assert.throws(()=>validateSettings({...config(),modelOverrides:{'fixture/mock':{defaults:{temperature:3}}}},directory));
