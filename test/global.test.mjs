@@ -24,6 +24,7 @@ const observationsFile = path.join(home, 'worker-directories.jsonl');
 const workingDirectory = path.join(home, 'workspace 中文 with spaces');
 const observations = async () => (await readFile(observationsFile, 'utf8')).trim().split('\n').map(JSON.parse);
 const requests = [];
+const faultAttempts=new Map();
 let refreshes = 0;
 let parallelRequests;
 let pausedStream;
@@ -42,6 +43,12 @@ const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
+  const fault=body.messages.find(m=>typeof m.content==='string'&&m.content.startsWith('GLOBAL_FAULT_'))?.content;
+  if(fault){const attempt=(faultAttempts.get(fault)??0)+1;faultAttempts.set(fault,attempt);
+    if((fault.startsWith('GLOBAL_FAULT_RATE_LIMIT')&&attempt<3)||fault.startsWith('GLOBAL_FAULT_PERMANENT_LIMIT')){res.writeHead(429,{'content-type':'application/json','retry-after':'0'});res.end(JSON.stringify({error:{message:'Too Many Requests: fixture rate limit',type:'rate_limit_error'}}));return;}
+    if(fault==='GLOBAL_FAULT_NETWORK'&&attempt===1){req.socket.destroy();return;}
+    if(fault==='GLOBAL_FAULT_PARTIAL'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: '+JSON.stringify({id:'partial',object:'chat.completion.chunk',created:1,model:'mock',choices:[{index:0,delta:{content:'PARTIAL_BEFORE_DISCONNECT'},finish_reason:null}]})+'\n\n');setTimeout(()=>res.destroy(),200);return;}
+  }
   if (req.url === '/anthropic/messages') {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
@@ -74,7 +81,11 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if (body.messages.some(m => m.content === 'AUDIT_INCREMENTAL')) {
+  if(body.tools?.some(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name))){
+    const forced=body.messages.some(m=>m.content==='GLOBAL_NATIVE_FORCE');
+    emit({tool_calls:[{index:0,id:'structured-native',type:'function',function:{name:body.tools.find(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name)).function.name,arguments:JSON.stringify(forced?{calls:[{name:'weather',arguments:{city:'北京'}}]}:{answer:42})}}]});
+    emit({},'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
+  } else if (body.messages.some(m => m.content === 'AUDIT_INCREMENTAL')) {
     for (const text of ['思', '考', '。']) { emit({ reasoning_content: text }); await delay(30); }
     for (const text of ['你好', '🙂', '\n\n```python\n']) { emit({ content: text }); await delay(30); }
     auditStream.started.resolve();
@@ -159,7 +170,7 @@ const globalConfig = {
   provider: {
     'fixture-oauth': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: { mock: { name: 'Subscription fixture', temperature: true, limit: { context: 100000, output: 1000 } } } },
     'fixture-api': { npm: '@ai-sdk/openai-compatible', options: { baseURL: baseURL + '/v1' }, models: {
-      mock: { name: 'Saved key fixture', limit: { context: 100000, output: 1000 } },
+      mock: { name: 'Saved key fixture', attachment:true,modalities:{input:['text','image','pdf'],output:['text']},limit: { context: 100000, output: 1000 } },
       'text-only': { temperature: false, tool_call: false, limit: { context: 100000, output: 1000 } },
       'DeepSeek-V4.1-Flash-line2-maas': { name: 'DeepSeek-V4.1-Flash-line2-maas', reasoning: false, options: { reasoningEffort: 'xhigh' }, limit: { context: 100000, output: 1000 } },
       'native-variants': { reasoning: true, options: { reasoningEffort: 'xhigh', fixture_nested: { keep: 'base', choose: 'base' } }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high', fixture_nested: { choose: 'native-high' } }, max: { reasoningEffort: 'max' }, private: { privateVariantToken: 'must-not-enter-metadata' } }, limit: { context: 100000, output: 1000 } },
@@ -387,10 +398,10 @@ test('upstream rejection before any output returns an HTTP error instead of a su
   const instance = new OpenCodeBridge({ ...options, onFailure: undefined });
   const response = await request({ messages: [{ role: 'user', content: 'EARLY_UPSTREAM_REJECTION' }], stream: true }, instance);
   const result = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(result));
+  assert.equal(response.status, 403, JSON.stringify(result));
   assert.match(response.headers.get('content-type'), /^application\/json/);
   assert.equal(result.error.message, 'Fixture provider rejected this request.');
-  assert.ok(['opencode_session_error', 'opencode_inference_error'].includes(result.error.code));
+  assert.equal(result.error.code,'upstream_auth_error');
   assert.equal(requests.length, before + 1, 'A provider rejection is not retried as another model call');
   assert.equal(instance.active, 0, 'Rejected requests release their worker');
 });
@@ -870,6 +881,61 @@ test('protocol compatibility: real global OpenCode preserves Responses history a
     for(const field of ['user','metadata','store','parallel_tool_calls','response_format'])assert.equal(requests.at(-1).body[field],undefined);
     assert.equal(runtime.current.active,0);
   }finally{await runtime.close();}
+});
+
+test('proxy constraints use native OpenCode structured output and preserve strict client-tool schemas',{timeout:90000},async()=>{
+ const instance=new OpenCodeBridge({...options,workerReuse:true,onFailure:undefined}),schema={type:'object',properties:{answer:{type:'integer',const:42}},required:['answer'],additionalProperties:false};
+ try{
+  for(const stream of [false,true]){
+   const r=await request({messages:[{role:'user',content:'GLOBAL_NATIVE_JSON'}],stream,reasoning_effort:stream?'high':'none',response_format:{type:'json_schema',json_schema:{name:'answer',schema,strict:true}},...(stream?{stream_options:{include_usage:true}}:{})},instance);
+   assert.equal(r.status,200);const values=stream?await Array.fromAsync(sseEvents(r.body)):[await r.json()];assert.ok(!values.some(x=>x.error),JSON.stringify(values));
+   assert.equal(requests.at(-1).body.reasoning_effort,stream?'high':'none');
+   if(stream)assert.notEqual(requests.at(-1).body.tool_choice,'required','Thinking mode must not use an incompatible forced provider tool choice');
+   const text=stream?values.map(x=>x.choices?.[0]?.delta?.content??'').join(''):values[0].choices[0].message.content;assert.deepEqual(JSON.parse(text),{answer:42});
+   const tool={type:'function',function:{name:'weather',strict:true,parameters:{type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}}};
+   const forced=await request({messages:[{role:'user',content:'GLOBAL_NATIVE_FORCE'}],tools:[tool],tool_choice:{type:'function',function:{name:'weather'}},parallel_tool_calls:false,stream},instance);
+   assert.equal(forced.status,200);const calls=stream?(await Array.fromAsync(sseEvents(forced.body))).flatMap(x=>x.choices?.[0]?.delta?.tool_calls??[]):(await forced.json()).choices[0].message.tool_calls;
+   assert.equal(calls.length,1);assert.equal(calls[0].function.name,'weather');assert.deepEqual(JSON.parse(calls[0].function.arguments),{city:'北京'});
+  }
+ }finally{await instance.close();}
+});
+test('real global OpenCode retries temporary rate limits and recovers from network failures without changing user auth',{timeout:120000},async()=>{
+ const instance=new OpenCodeBridge({...options,workerReuse:true,firstOutputTimeoutMs:20000,onFailure:undefined});
+ try{
+  for(const fault of ['GLOBAL_FAULT_RATE_LIMIT','GLOBAL_FAULT_NETWORK']){
+   const r=await request({messages:[{role:'user',content:fault}]},instance);const result=await r.json();
+   if(fault==='GLOBAL_FAULT_RATE_LIMIT'){assert.equal(r.status,200,JSON.stringify(result));assert.equal(faultAttempts.get(fault),3);}
+   else assert.ok([200,502].includes(r.status),JSON.stringify(result));
+   const recovered=await request({messages:[{role:'user',content:'hello after '+fault}]},instance);assert.equal(recovered.status,200);await recovered.json();assert.equal(instance.active,0);
+  }
+  const limited=await request({messages:[{role:'user',content:'GLOBAL_FAULT_PERMANENT_LIMIT'}]},instance);const error=await limited.json();assert.equal(limited.status,429,JSON.stringify(error));assert.equal(error.error.code,'upstream_rate_limit');assert.ok(limited.headers.get('retry-after'));assert.equal(faultAttempts.get('GLOBAL_FAULT_PERMANENT_LIMIT'),3);
+  const interrupted=await request({messages:[{role:'user',content:'GLOBAL_FAULT_PARTIAL'}],stream:true},instance);
+  assert.equal(interrupted.status,200);const chunks=await Array.fromAsync(sseEvents(interrupted.body));assert.ok(JSON.stringify(chunks).includes('PARTIAL_BEFORE_DISCONNECT'));assert.ok(chunks.some(c=>c.error));assert.ok(!chunks.some(c=>c.choices?.[0]?.finish_reason==='stop'));assert.equal(faultAttempts.get('GLOBAL_FAULT_PARTIAL'),1,'Do not replay a supplier request after partial output');
+  const next=await request({messages:[{role:'user',content:'hello after partial disconnect'}]},instance);assert.equal(next.status,200);await next.json();
+ }finally{await instance.close();}
+});
+
+test('fault recovery and rate-limit error contracts survive all three client protocol adapters',{timeout:120000},async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'protocol-fault-settings.json'),settings:{...options,onFailure:undefined,host:'127.0.0.1',port:0,workerReuse:true,firstOutputTimeoutMs:20000,discoverModels:false,modelOverrides:{},apiKeys:[{id:'fixture',name:'fixture',key:'fixture-proxy-key',enabled:true}]}});
+ try{for(const protocol of ['chat','responses','anthropic'])for(const stream of [false,true]){
+  const send=marker=>runtime.fetch('http://proxy/v1/'+({chat:'chat/completions',responses:'responses',anthropic:'messages'}[protocol]),{method:'POST',body:JSON.stringify({model:'oc-default',stream,...(protocol==='responses'?{input:marker,store:false}:{messages:[{role:'user',content:marker}],...(protocol==='anthropic'?{max_tokens:100}:{})})})});
+  const good='GLOBAL_FAULT_RATE_LIMIT_'+protocol+'_'+stream,r=await send(good);assert.equal(r.status,200);const result=stream?await Array.fromAsync(sseEvents(r.body)):await r.json();assert.ok(JSON.stringify(result).includes('全局 OpenCode'));assert.equal(faultAttempts.get(good),3);
+  const bad='GLOBAL_FAULT_PERMANENT_LIMIT_'+protocol+'_'+stream,limited=await send(bad),error=await limited.json();assert.equal(limited.status,429,JSON.stringify(error));assert.ok(limited.headers.get('retry-after'));assert.equal(error.error.type,'rate_limit_error');
+  assert.equal(faultAttempts.get(bad),3);assert.equal(runtime.current.active,0);
+ }}finally{await runtime.close();}
+});
+
+test('inline image parts cross all protocol adapters and the real OpenCode SDK without file access',{timeout:60000},async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'media-settings.json'),settings:{...options,onFailure:undefined,host:'127.0.0.1',port:0,workerReuse:true,discoverModels:false,modelOverrides:{},models:{vision:{model:'fixture-api/mock',context:100000,output:1000,inputModalities:['text','image']},plain:{model:'fixture-api/mock',context:100000,output:1000,inputModalities:['text']}},apiKeys:[{id:'fixture',name:'fixture',key:'fixture-proxy-key',enabled:true}]}});
+ const data='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yS7cAAAAASUVORK5CYII=',url='data:image/png;base64,'+data;
+ try{for(const protocol of ['chat','responses','anthropic']){
+  const content=protocol==='chat'?[{type:'text',text:'Inspect this image.'},{type:'image_url',image_url:{url}}]:protocol==='responses'?[{type:'input_text',text:'Inspect this image.'},{type:'input_image',image_url:url}]:[{type:'text',text:'Inspect this image.'},{type:'image',source:{type:'base64',media_type:'image/png',data}}];
+  const b={model:'vision',...(protocol==='responses'?{input:[{role:'user',content}],store:false}:{messages:[{role:'user',content}],...(protocol==='anthropic'?{max_tokens:100}:{})})};
+  const route='http://proxy/v1/'+({chat:'chat/completions',responses:'responses',anthropic:'messages'}[protocol]);
+  const r=await runtime.fetch(route,{method:'POST',body:JSON.stringify(b)}),result=await r.json();assert.equal(r.status,200,JSON.stringify(result));
+  const sent=requests.at(-1).body.messages.find(m=>m.role==='user').content;assert.ok(Array.isArray(sent));assert.equal(sent[0].text,'Inspect this image.');assert.equal(sent[1].image_url.url,url);
+  const before=requests.length,rejected=await runtime.fetch(route,{method:'POST',body:JSON.stringify({...b,model:'plain'})});assert.equal(rejected.status,400);assert.equal(requests.length,before);
+ }}finally{await runtime.close();}
 });
 
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{

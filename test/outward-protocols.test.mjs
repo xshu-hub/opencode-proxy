@@ -29,7 +29,7 @@ test('DSH compatibility does not allow other unknown fields or unsupported infer
   const body={model:'demo',...request,dsh_plugin_packages:{version:1,packages:[]}};
   for(const field of ['unknown_option','dsh_session_log','dsh_future'])assert.throws(()=>validateRequest(toChatRequest(protocol,{...body,[field]:{}}),{demo:{output:1000}}),e=>e.status===400&&e.param.endsWith(field));
  }
- assert.throws(()=>toChatRequest('responses',{model:'demo',input:'hello',store:true,dsh_plugin_packages:{version:1,packages:[]}}),e=>e.status===400&&e.param==='store');
+ assert.equal(toChatRequest('responses',{model:'demo',input:'hello',store:true,dsh_plugin_packages:{version:1,packages:[]}}).messages[0].content,'hello');
 });
 test('Anthropic history preserves text/tool batches/results and adaptive effort',()=>{
  const body=toChatRequest('anthropic',{model:'demo',max_tokens:100,system:[{type:'text',text:'system',cache_control:{type:'ephemeral'}}],messages:[{role:'user',content:'question'},{role:'assistant',content:[{type:'text',text:'calling'},{type:'tool_use',id:'a',name:'weather',input:{city:'北京'}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'a',content:[{type:'text',text:'sunny'}]}]}],thinking:{type:'adaptive'},output_config:{effort:'high'}});
@@ -58,14 +58,14 @@ test('Anthropic accepts current function-tool streaming preferences without weak
   const body=toChatRequest('anthropic',{model:'demo',max_tokens:100,top_k:20,stop_sequences:[],stream:true,thinking:{type:'adaptive',display:'omitted'},messages:[{role:'user',content:'hello'}],tools:[{type:'custom',name:'weather',input_schema:{type:'object'},eager_input_streaming:flag,strict:false}]});
   validateRequest(body,{demo:{output:1000}});assert.equal(body.top_k,20);assert.deepEqual(body.tools,[{type:'function',function:{name:'weather',parameters:{type:'object'},strict:false}}]);assert.equal(body.stream_options.include_usage,true);
  }
- for(const patch of [{eager_input_streaming:'yes'},{type:'bash_20250124'},{strict:true},{unrecognized:true}])assert.throws(()=>validateRequest(toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],tools:[{name:'weather',input_schema:{type:'object'},...patch}]}),{demo:{output:1000}}),e=>e.status===400);
+ for(const patch of [{eager_input_streaming:'yes'},{type:'bash_20250124'},{strict:'yes'},{unrecognized:true}])assert.throws(()=>validateRequest(toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],tools:[{name:'weather',input_schema:{type:'object'},...patch}]}),{demo:{output:1000}}),e=>e.status===400);
  for(const top_k of [-1,1.5,'20'])assert.throws(()=>validateRequest(toChatRequest('anthropic',{model:'demo',max_tokens:100,top_k,messages:[{role:'user',content:'hi'}]}),{demo:{output:1000}}),e=>e.status===400&&e.param==='top_k');
  assert.throws(()=>toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],thinking:{type:'adaptive',display:'summarized'}}),e=>e.status===400&&e.param==='thinking.display');
 });
 test('Chat accepts harmless standard hints and still rejects unsupported guarantees',()=>{
  const request={model:'demo',messages:[{role:'user',content:'hello'}],stream:true},client={...request,user:'client-user',metadata:{client:'sdk'},store:false,stop:[],response_format:{type:'text'},parallel_tool_calls:true},snapshot=structuredClone(client);
  const body=toChatRequest('chat',client);validateRequest(body,{demo:{output:1000}});assert.deepEqual(body,request);assert.deepEqual(client,snapshot);
- for(const patch of [{store:true},{store:'false'},{user:{}},{metadata:[]},{stop:['END']},{parallel_tool_calls:false},{response_format:{type:'json_schema'}},{tool_choice:'required'}])assert.throws(()=>validateRequest(toChatRequest('chat',{...request,...patch}),{demo:{output:1000}}),e=>e.status===400);
+ for(const patch of [{store:true},{store:'false'},{user:{}},{metadata:[]},{stop:['END']},{response_format:{type:'json_schema'}},{tool_choice:'required'}])assert.throws(()=>validateRequest(toChatRequest('chat',{...request,...patch}),{demo:{output:1000}}),e=>e.status===400);
 });
 test('Anthropic thinking mode toggles are distinct from numeric budgets and honor explicit effort',()=>{
  const request={model:'demo',max_tokens:4096,messages:[{role:'user',content:'hello'}]};
@@ -78,7 +78,7 @@ test('Anthropic thinking mode toggles are distinct from numeric budgets and hono
  assert.throws(()=>toChatRequest('anthropic',{...request,thinking:{type:'disabled'},output_config:{effort:'high'}}),e=>e.status===400);
 });
 test('Unsupported state, strict-output and signed-thinking semantics fail explicitly',()=>{
- for(const extra of [{previous_response_id:'resp_old'},{store:true},{text:{format:{type:'json_schema'}}},{input:[{role:'user',content:[{type:'input_image',image_url:'x'}]}]}])assert.throws(()=>toChatRequest('responses',{model:'demo',input:'hello',...extra}),e=>e.status===400);
+ for(const extra of [{previous_response_id:3},{store:'true'},{input:[{role:'user',content:[{type:'input_image',image_url:'x'}]}]}])assert.throws(()=>toChatRequest('responses',{model:'demo',input:'hello',...extra}),e=>e.status===400);
  assert.throws(()=>toChatRequest('anthropic',{model:'demo',messages:[{role:'user',content:'hello'}],max_tokens:100,thinking:{type:'enabled',budget_tokens:100}}),e=>e.status===400);
 });
 test('Responses streaming emits sequenced events, complete items, Unicode and usage',async()=>{

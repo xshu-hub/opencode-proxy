@@ -5,3 +5,5 @@ Retains the original MIT license and copyright notice.
 This repository contains no Magpie backend application or plugin adapter.
 
 Since 0.8.0 the frontend is independently implemented with native ES modules and CSS. It does not ship Magpie frontend code or assets. The visual research references are Tabler (https://github.com/tabler/tabler) and Flowbite Admin Dashboard (https://github.com/themesberg/flowbite-admin-dashboard); no template, framework or library from those projects is bundled. Frontend structure and scope are documented in docs/frontend-port.md. The original Magpie MIT notice remains for the bridge core.
+
+JSON Schema validation bundles Ajv, ajv-formats and their runtime dependencies. Their license texts are included in docs/third-party-licenses.txt.

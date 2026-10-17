@@ -70,9 +70,9 @@ test('global mode needs no supplier configuration or upstream key and defaults t
   assert.throws(() => normalizeConfig({ mode: 'global', models: { test: { model: 'missing-provider', context: 1, output: 1 } } }), /provider\/model/);
 });
 test('reject unsupported API semantics before inference', () => {
-  for (const extra of [{ n: 2 }, { response_format: { type: 'json_object' } }, { tool_choice: 'required' }, { parallel_tool_calls: false }, { max_tokens: 101 }, { stop: ['x'] }, { stream: 'yes' }, { temperature: -1 }]) assert.throws(() => validateRequest({ ...base(), ...extra }, models));
+  for (const extra of [{ n: 2 }, { tool_choice: 'required' }, { max_tokens: 101 }, { stop: ['x'] }, { stream: 'yes' }, { temperature: -1 }]) assert.throws(() => validateRequest({ ...base(), ...extra }, models));
   assert.throws(() => validateRequest({ ...base(), messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/image' } }] }] }, models));
-  assert.throws(() => validateRequest({ ...base(), tools: [{ type: 'function', function: { name: 'x', strict: true } }] }, models));
+  assert.throws(() => validateRequest({ ...base(), tools: [{ type: 'function', function: { name: 'x', strict: 'yes' } }] }, models));
   assert.throws(() => validateRequest({ ...base(), model: '__proto__' }, models));
   assert.equal(validateRequest({ ...base(), temperature: 0, max_tokens: 100, tools: [], tool_choice: 'none' }, models).temperature, 0);
 });

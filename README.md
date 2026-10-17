@@ -16,6 +16,8 @@
 
 参数留空跟随 OpenCode，客户端显式参数优先。上限不能超过 OpenCode 报告的值，别名不能冲突。自定义思考档位仍需上游 SDK 与模型支持；未知 SDK 保留原生档位。
 
+三种客户端协议支持严格 JSON 输出、严格函数参数、指定/必选工具及串行工具约束。Responses 显式 `store=true` 可使用按访问 Key 隔离、有过期和容量限制的内存会话续接、查询与删除；默认仍不保存会话。内联附件按 OpenCode 模型声明的输入能力转发。短暂断网/限流由 OpenCode 在输出前有限重试，输出后故障明确返回错误，避免重放内容。完整支持范围和限制见 [协议说明](docs/protocols.md)。
+
 默认配置 `%LOCALAPPDATA%\OpenCodeProxy\config.json`。关闭窗口隐藏到托盘，网关继续运行。再次启动 EXE、点击托盘图标或菜单“打开”恢复窗口；“退出程序”才停止服务。`opencode-proxy.exe --background` 启动到托盘。
 
 ## Linux
@@ -39,14 +41,14 @@ ssh -L 8788:127.0.0.1:8788 user@server
 
 Cherry Studio 等客户端填写 API 地址与访问 Key，再刷新模型列表。支持 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`。Anthropic SDK 使用不含 /v1 的根地址。首次启动自动生成访问 Key；它与供应商凭证不同。
 
-三种接口提供文本与函数工具的兼容子集。Responses 支持将返回的 output 原样加入多轮历史；Anthropic 支持常见流式工具参数。模型列表和单模型查询按客户端返回 OpenAI 或 Anthropic 格式，API 支持浏览器 CORS。尚不支持的状态存储、严格 JSON、加密推理及 Token 预估等能力详见 [协议说明](docs/protocols.md)。
+三种接口提供历史、函数工具、结构化输出和内联附件的兼容子集。Responses 支持将返回的 output 原样加入多轮历史，也支持显式启用内存会话续接；Anthropic 支持常见流式工具参数。模型列表和单模型查询按客户端返回 OpenAI 或 Anthropic 格式，API 支持浏览器 CORS。加密推理、签名思考历史、Token 预估等限制详见 [协议说明](docs/protocols.md)。
 
 不再采集持久化统计、不将提示词、工具参数及原始请求/响应保存为请求日志；不读取、不删除旧统计文件或请求记录。管理界面不提供统计、请求日志或有效请求视图。响应中真实 usage 仍转发。必要的进程错误和可选诊断仍可输出到终端；Windows 桌面端将服务的标准错误输出写入配置目录下的 `desktop.log`，用于启动与运行故障排查。
 
 - 不限制 OpenCode 版本，兼容性由其公开 API/hooks 决定。
-- 默认不限并发，每个活动请求独占进程、会话和数据库。默认最多复用两个健康空闲工作进程，空闲 60 秒退出。
+- 默认不限请求并发，执行中的请求独占进程、会话和数据库。冷启动最多同时初始化两个进程，请求可在启动超时范围内等待；不限制已初始化请求的推理并发。默认最多复用两个健康空闲工作进程，空闲 60 秒退出。
 - 供应商、登录与认证插件由全局 OpenCode 管理。客户端系统提示与历史通过公开 hooks 替换默认代理提示；认证插件的参数、请求头及 fetch 逻辑仍可能运行。
-- 禁止执行本地内置工具，function tools 由客户端执行。参数在完整 JSON 后返回，没有逐字符工具参数 delta。暂不支持图片、音频、embeddings；详见 [协议说明](docs/protocols.md)。
+- 禁止执行本地内置工具，function tools 由客户端执行。参数在完整 JSON 后返回，没有逐字符工具参数 delta。内联图片、PDF 和音频需要模型声明对应输入能力；不支持 embeddings、远程附件 URL 或文件 ID，详见 [协议说明](docs/protocols.md)。
 - 首输出默认 120 秒，输出空闲默认 180 秒，总时长默认不限。旧配置总超时仍生效，可在设置中改为 0。
 
 ## 开发
@@ -56,8 +58,13 @@ npm ci --ignore-scripts
 npm ci --prefix frontend --ignore-scripts
 npm run build:ui
 npm test
+npm run test:integration # TEST_OPENCODE_COMMAND 指向真实 OpenCode；使用一次性配置和本地模拟供应商
 npm run package:windows  # Go + Bun
 npm run package:linux    # Bun
 ```
 
 GitHub 构建 Windows/Linux，检查前端语法、单元测试、Windows 托盘，以及真实 OpenCode 1.18.35 + 本地模拟供应商的打包后集成测试。不调用生产账号，不构建 Magpie。[前端说明](docs/frontend-port.md)记录设计参考与结构；桥接核心继续保留原 Magpie MIT 版权声明。
+
+真实供应商回归使用 `npm run test:live`，需要设置 `OPENCODE_PROXY_LIVE_URL`（网关的 /v1 基址）和 `OPENCODE_PROXY_LIVE_KEY`（网关访问 Key）。`OPENCODE_PROXY_LIVE_MODELS` 为逗号分隔的短模型名，默认测试 deepseek-flash、deepseek-v4-pro；`OPENCODE_PROXY_LIVE_CONCURRENCY` 默认 12。脚本只向网关发起推理请求，结果默认写入系统临时目录。可用 `-- --pressure-only` 单独重跑压力场景。
+
+若额外设置 `OPENCODE_PROXY_LIVE_ADMIN_URL` 和 `OPENCODE_PROXY_LIVE_ADMIN_KEY`，脚本会在该测试实例上临时设置并发上限 8，发起 64 路突发请求，然后恢复原配置。此管理场景应连接独立测试实例，避免影响已有服务。CI 仅使用一次性配置和本地模拟供应商，不运行需要真实账号的 test:live。

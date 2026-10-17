@@ -4,7 +4,7 @@ All inference is performed by the real global OpenCode process. Client protocols
 are translated to one internal history/tool representation, never directly to a
 supplier HTTP call. The model list, aliases, access keys and configured defaults
 are shared by all three routes.
-These are text/function-tool compatibility subsets, not full implementations of
+These are compatibility subsets, not full implementations of
 every OpenAI or Anthropic feature.
 
 | Protocol | Route | Authentication | Streaming |
@@ -33,7 +33,7 @@ The API listener supports browser CORS preflight and explicit access-key headers
 it does not use browser cookies. The separate management listener retains its
 local-only authentication and origin checks.
 
-Supported: text history, system instructions, automatic client function tools,
+Supported: text history, system instructions, automatic/required/named client function tools,
 parallel returned calls, matching tool results, streaming/nonstreaming output,
 temperature/top_p, output limits, and model-supported reasoning effort.
 Responses `max_output_tokens` maps to the core output limit. Anthropic requires
@@ -43,29 +43,64 @@ Configured model defaults apply only when the client omits the corresponding
 parameter. Tool execution stays with the client; native OpenCode local tools,
 skills and agent instructions are disabled for API requests.
 
-Responses is stateless: `store=false` is always effective, including when omitted.
-Send complete `input` history, including returned function_call items and matching
+Responses defaults to `store=false`, including when omitted. Explicit `store=true`
+enables a bounded, process-local conversation cache: 30 minute TTL, at most 256
+responses / 32 MiB total, 4 MiB per response, oldest entries evicted first. State
+is isolated by the authenticated gateway key ID and disappears on process exit.
+It is never persisted or included in diagnostic logs. GET and DELETE
+`/v1/responses/{id}` retrieve/delete owned snapshots; missing, expired, evicted,
+deleted and other clients' IDs return 404. `previous_response_id` restores the
+stored input/output history; generation options and `instructions` are supplied
+for the new request and are not inherited. Deleting a parent does not delete an
+already-created child snapshot. Only completed/incomplete terminal responses are
+cached; failed and cancelled streams create no stored response.
+With `store=false`, send complete `input` history, including function_call and matching
 function_call_output items. Returned `output` items can be appended unchanged to
 the next request: output-text annotations/logprobs are accepted as metadata, and
 text reasoning summaries stay attached to the corresponding assistant turn.
 `include:["reasoning.encrypted_content"]` is accepted as an optional include hint;
 no encrypted state is generated. Input reasoning may omit `encrypted_content`
 or set it to null; non-null opaque state cannot be restored and returns HTTP 400.
-No previous_response_id, response retrieval/deletion,
-background jobs, built-in search/computer tools, encrypted reasoning, automatic
-truncation, images/files/audio, strict JSON output or forced function selection.
-Unsupported semantics return HTTP 400 before inference. Only automatic tools or
-disabled tools are accepted; serial tool batching cannot be guaranteed.
+Background jobs, built-in search/computer tools, encrypted reasoning, automatic
+truncation and remote/file-ID attachment retrieval remain unavailable.
+Unsupported semantics return HTTP 400 before inference.
+Chat `response_format` supports text, json_object and json_schema; Responses
+`text.format` supports the same, and Anthropic supports
+`output_config.format:{type:"json_schema",schema:...}`. Schemas are locally
+compiled/validated with draft-07 keywords and standard string formats (at most
+64 KiB per compiled schema; unknown schema keywords/formats and unresolved remote
+references fail explicitly). Strict function argument schemas
+are also validated before returning calls. Invalid constrained output returns an
+explicit 502, rather than an apparently successful response violating the schema.
+
+Required/named function selection and `parallel_tool_calls:false` (Anthropic
+`disable_parallel_tool_use:true`) use a constrained calls array; a serial request
+returns at most one call and a required request returns at least one. Client
+functions still execute only in the client. With explicitly disabled thinking,
+constraints use OpenCode's public structured-output format. Otherwise a scoped
+MCP JSON-capture tool avoids the native format's forced `tool_choice=required`,
+which some thinking providers reject. Thinking controls are preserved. The
+capture tool only returns data, never runs client functions or local actions.
 Chat accepts `parallel_tool_calls:true`, `response_format:{"type":"text"}` and
 `store:false`. Chat `user`/`metadata` are accepted as hints without forwarding or
 logging. Empty Chat `stop` and Anthropic `stop_sequences` lists are accepted;
 nonempty custom stop sequences cannot be mapped through the public hooks.
 
-Anthropic custom tools accept `type:"custom"`, `strict:false` and the optional
+Anthropic custom tools accept `type:"custom"`, boolean `strict` and the optional
 `eager_input_streaming` flag. Streaming still returns standard `tool_use` and
 `input_json_delta` events with the complete argument JSON once OpenCode exposes
 it. Eager streaming is a latency preference; the proxy cannot promise partial
-arguments before then. Strict schemas and server-native tools remain unsupported.
+arguments before then. Server-native tools remain unsupported.
+
+Inline attachments are translated to OpenCode file parts, preserving order with
+text. Chat accepts image_url, file.file_data and input_audio; Responses accepts
+input_image/input_file; Anthropic accepts base64 image/document or text document
+blocks. Supported MIME types are PNG/JPEG/GIF/WebP, PDF, UTF-8 text, WAV and MP3.
+Use base64 data URLs; remote URLs, local file paths and server file IDs are
+rejected. Text documents are decoded as text. Other modalities require the
+selected model to advertise the matching OpenCode input capability, otherwise a
+clear HTTP 400 is returned before inference. This does not give text-only models
+vision/audio capability. Multimodal tool-result blocks remain unsupported.
 
 Responses reasoning summary events carry the textual reasoning that OpenCode
 actually exposes; there is no provider-independent encrypted reasoning state.
@@ -117,6 +152,20 @@ request-log or effective-request views.
 Stream-start envelopes and heartbeats do not count as first output. Partial
 stream errors emit the protocol's error event and never a successful completion.
 Downstream cancellation cancels the OpenCode request.
+OpenCode owns transport retries. Before the first text/reasoning/tool output, the
+proxy permits up to two native retries, bounded by existing timeout settings;
+the third retry notification or an excessive retry delay returns 429/503 and a
+Retry-After hint. Original public API error status and Retry-After are preserved.
+After output starts, retries are stopped with a protocol error to avoid replaying
+partial text or duplicate client actions. Broken/failed workers are retired;
+subsequent requests can create fresh workers. No independent supplier retry or
+direct supplier HTTP call is added by the proxy.
+Cold OpenCode worker initialization is paced to two starts at a time to avoid
+Windows process/thread initialization failures during bursts. Requests wait in
+the cancellable startup phase under the existing startup timeout. This does not
+limit admitted requests or concurrently running inference; `maxConcurrent=0`
+still means unlimited. An explicitly configured maxConcurrent continues to
+reject excess requests with 429 instead of growing the startup queue.
 
 Protocol references:
 - https://developers.openai.com/api/reference/resources/responses/streaming-events
