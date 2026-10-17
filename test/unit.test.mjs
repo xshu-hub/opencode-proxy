@@ -12,6 +12,12 @@ test('reasoning_effort accepts API levels and rejects invalid values before infe
   for (const reasoning_effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) assert.equal(validateRequest({ ...base(), reasoning_effort }, models).reasoning_effort, reasoning_effort);
   for (const reasoning_effort of ['', 'HIGH', 'thinking', null, 0, {}, []]) assert.throws(() => validateRequest({ ...base(), reasoning_effort }, models), error => error.status === 400 && error.param === 'reasoning_effort');
 });
+test('thinking validates mode, budget boundaries and effort conflicts before inference',()=>{
+ const catalog={test:{output:4096}},body={...base(),max_tokens:2049};
+ for(const thinking of [{type:'enabled'},{type:'disabled'},{type:'enabled',budget_tokens:2048}])assert.deepEqual(validateRequest({...body,thinking},catalog).thinking,thinking);
+ for(const thinking of [null,[],{type:'adaptive'},{type:'enabled',budget_tokens:2049},{type:'enabled',budget_tokens:1023},{type:'enabled',budget_tokens:'1024'},{type:'disabled',budget_tokens:1024},{type:'enabled',options:{thinking:{type:'enabled'}}}])assert.throws(()=>validateRequest({...body,thinking},catalog),e=>e.status===400);
+ for(const [thinking,reasoning_effort] of [[{type:'enabled'},'none'],[{type:'disabled'},'high']])assert.throws(()=>validateRequest({...body,thinking,reasoning_effort},catalog),e=>e.status===400);
+});
 
 test('workingDirectory resolves relative to the config file and rejects invalid path values', () => {
   const directory = path.resolve('fixture-config');

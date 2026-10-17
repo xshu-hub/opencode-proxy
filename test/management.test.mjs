@@ -108,6 +108,10 @@ test('model validation rejects conflicting aliases and invalid defaults before p
   await assert.rejects(()=>runtime.save({...runtime.settings,modelOverrides:{'fixture/mock':{output:2000}}}),e=>e.code==='model_limit');
   assert.throws(()=>validateSettings({...config(),modelOverrides:{'fixture/mock':{defaults:{temperature:3}}}},directory));
   assert.deepEqual(withModelDefaults({max_completion_tokens:50,temperature:0.9},{defaults:{max_tokens:100,temperature:0.2,top_p:0.8}}),{max_completion_tokens:50,temperature:0.9,top_p:0.8});
+  assert.deepEqual(withModelDefaults({thinking:{type:'disabled'}},{defaults:{reasoning_effort:'high',temperature:0.2}}),{thinking:{type:'disabled'},temperature:0.2});
+  assert.deepEqual(withModelDefaults({thinking:{type:'enabled'}},{defaults:{reasoning_effort:'none',temperature:0.2}}),{thinking:{type:'enabled'},temperature:0.2});
+  assert.equal(withModelDefaults({thinking:{type:'enabled'}},{defaults:{reasoning_effort:'low'}}).reasoning_effort,'low');
+  assert.equal(withModelDefaults({thinking:{type:'enabled'},reasoning_effort:'low'},{defaults:{reasoning_effort:'high'}}).reasoning_effort,'low');
 }));
 test('Magpie model editor batch save is atomic, clears overrides, and preserves other settings',async()=>fixture(async({runtime,base,directory})=>{
   const headers={authorization:'Bearer fixture-admin-key','content-type':'application/json'};

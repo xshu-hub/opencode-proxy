@@ -163,6 +163,7 @@ const globalConfig = {
       'text-only': { temperature: false, tool_call: false, limit: { context: 100000, output: 1000 } },
       'DeepSeek-V4.1-Flash-line2-maas': { name: 'DeepSeek-V4.1-Flash-line2-maas', reasoning: false, options: { reasoningEffort: 'xhigh' }, limit: { context: 100000, output: 1000 } },
       'native-variants': { reasoning: true, options: { reasoningEffort: 'xhigh', fixture_nested: { keep: 'base', choose: 'base' } }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high', fixture_nested: { choose: 'native-high' } }, max: { reasoningEffort: 'max' }, private: { privateVariantToken: 'must-not-enter-metadata' } }, limit: { context: 100000, output: 1000 } },
+      'thinking-toggle': { reasoning: true, options: { reasoningEffort: 'none' }, variants: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high' } }, limit: { context: 100000, output: 4096 } },
     } },
     'fixture-anthropic': { npm: '@ai-sdk/anthropic', options: { baseURL: baseURL + '/anthropic' }, models: {
       'native-thinking': { reasoning: true, variants: { high: { thinking: { type: 'enabled', budgetTokens: 1024 } } }, limit: { context: 100000, output: 4096 } },
@@ -820,6 +821,30 @@ test('reuse13: a slow downstream reader does not idle-timeout an upstream that h
   } finally {auditStream.release.resolve();await instance.close();}
 });
 
+test('thinking compatibility: enabled toggles and explicit budgets reach the real global OpenCode SDK', {timeout:120000}, async()=>{
+  const {onFailure,...configuration}=options;
+  const runtime=new ProxyRuntime({file:path.join(home,'thinking-config.json'),settings:{...configuration,workerReuse:true,maxIdleWorkers:2,host:'127.0.0.1',port:0,modelOverrides:{'fixture-api/thinking-toggle':{defaults:{reasoning_effort:'none'}}},apiKeys:[{id:'test',name:'fixture',key:'fixture-thinking-key',enabled:true}],models:{effort:{model:'fixture-api/thinking-toggle',context:100000,output:4096,reasoning:true,reasoningEfforts:['none','low','high'],reasoningAdapter:'effort'},budget:{model:'fixture-anthropic/native-thinking',context:100000,output:4096},plain:{model:'fixture-anthropic/no-reasoning',context:100000,output:4096}}}});
+  try{
+    await runtime.startGateway();const base=runtime.state().endpoint;
+    const send=(model,thinking,stream=false,extra={})=>fetch(base+'/messages',{method:'POST',headers:{'x-api-key':'fixture-thinking-key','content-type':'application/json'},body:JSON.stringify({model,max_tokens:4096,messages:[{role:'user',content:'hello'}],thinking,stream,...extra})});
+    const consume=async response=>{assert.equal(response.status,200,response.status===200?'':await response.text());if(response.headers.get('content-type')?.includes('event-stream')){const events=await Array.fromAsync(sseEvents(response.body));assert.equal(events.at(-1).type,'message_stop');assert.equal(events.some(e=>e.type==='error'),false,JSON.stringify(events));}else assert.equal((await response.json()).stop_reason,'end_turn');};
+    for(const stream of [false,true]){
+      await consume(await send('effort',{type:'enabled'},stream));assert.notEqual(requests.at(-1).body.reasoning_effort,'none');assert.ok(requests.at(-1).body.reasoning_effort);assert.equal(requests.at(-1).body.thinking,undefined);
+      await consume(await send('budget',{type:'enabled',budget_tokens:2048},stream));assert.deepEqual(requests.at(-1).body.thinking,{type:'enabled',budget_tokens:2048});assert.equal(requests.at(-1).body.reasoning_effort,undefined);
+    }
+    await consume(await send('effort',{type:'disabled'}));assert.equal(requests.at(-1).body.reasoning_effort,'none');
+    await consume(await send('effort',{type:'enabled'},false,{output_config:{effort:'low'}}));assert.equal(requests.at(-1).body.reasoning_effort,'low');
+    await consume(await send('budget',{type:'disabled'}));assert.ok([undefined,'disabled'].includes(requests.at(-1).body.thinking?.type));
+    await consume(await send('budget',{type:'enabled'}));assert.deepEqual(requests.at(-1).body.thinking,{type:'enabled',budget_tokens:1024});
+    const before=requests.length;
+    for(const [model,thinking,extra] of [['effort',{type:'enabled',budget_tokens:2048},{}],['plain',{type:'enabled'},{}],['budget',{type:'enabled',budget_tokens:4096},{}],['effort',{type:'enabled'},{output_config:{effort:'none'}}]]){
+      const rejected=await send(model,thinking,false,extra);assert.equal(rejected.status,400);const error=await rejected.json();assert.equal(error.error.type,'invalid_request_error');if(model==='effort'&&thinking.budget_tokens)assert.match(error.error.message,/cannot preserve a numeric thinking budget/);
+    }
+    assert.equal(requests.length,before,'Invalid thinking controls never start supplier inference');assert.equal(runtime.current.active,0);
+    const omitted=await fetch(base+'/messages',{method:'POST',headers:{'x-api-key':'fixture-thinking-key'},body:JSON.stringify({model:'effort',max_tokens:4096,messages:[{role:'user',content:'hello'}]})});await consume(omitted);assert.equal(requests.at(-1).body.reasoning_effort,'none','Thinking controls are reset when an idle worker is reused');
+  }finally{await runtime.close();}
+});
+
 test('protocol compatibility: real global OpenCode preserves Responses history and buffered Anthropic tools', {timeout:120000}, async()=>{
   const {onFailure,...configuration}=options;
   const runtime=new ProxyRuntime({file:path.join(home,'protocol-config.json'),settings:{...configuration,host:'127.0.0.1',port:0,modelOverrides:{},apiKeys:[{id:'test',name:'fixture',key:'fixture-protocol-key',enabled:true}],models:{friendly:{model:'fixture-api/mock',context:100000,output:1000},native:{model:'fixture-anthropic/native-thinking',context:100000,output:4096}}}});
@@ -898,7 +923,7 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     await sendEffort();assert.equal(requests.at(-1).body.reasoning_effort,'high');assert.deepEqual(requests.at(-1).body.fixture_nested,{keep:'base',choose:'native-high'});await sendEffort('low');assert.equal(requests.at(-1).body.reasoning_effort,'low');
     const customMapping={high:{reasoningEffort:'max',fixture_nested:{choose:'custom-high'}}};
     assert.equal((await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{reasoningVariants:customMapping}})).status,200);
-    for(const [route,body] of [['chat/completions',{model:'native-variants',messages:[{role:'user',content:'Custom reasoning'}]}],['responses',{model:'native-variants',input:'Custom reasoning',reasoning:{effort:'high'}}],['messages',{model:'native-variants',max_tokens:100,messages:[{role:'user',content:'Custom reasoning'}],thinking:{type:'adaptive'},output_config:{effort:'high'}}]]){
+    for(const [route,body] of [['chat/completions',{model:'native-variants',messages:[{role:'user',content:'Custom reasoning'}]}],['responses',{model:'native-variants',input:'Custom reasoning',reasoning:{effort:'high'}}],['messages',{model:'native-variants',max_tokens:100,messages:[{role:'user',content:'Custom reasoning'}],thinking:{type:'enabled'},output_config:{effort:'high'}}]]){
       const reply=await fetch(state.endpoint+'/'+route,{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,200,reply.status===200?'':await reply.text());await reply.text();assert.equal(requests.at(-1).body.reasoning_effort,'max');assert.deepEqual(requests.at(-1).body.fixture_nested,{keep:'base',choose:'custom-high'});
     }
     assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:false}})).status,200);

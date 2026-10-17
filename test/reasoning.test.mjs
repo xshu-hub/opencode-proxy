@@ -1,6 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyReasoning, publicReasoning, validateReasoningVariants,reasoningPresetVariants } from '../lib/reasoning.mjs';
+import { applyReasoning, applyThinking, publicReasoning, validateReasoningVariants,reasoningPresetVariants } from '../lib/reasoning.mjs';
+
+test('enabled thinking without a budget preserves positive native defaults or selects an actual variant',()=>{
+ const model={api:{npm:'@ai-sdk/openai-compatible'},capabilities:{reasoning:true},variants:{high:{reasoningEffort:'high'},low:{reasoningEffort:'low'}}};
+ const options={reasoningEffort:'none',nested:{keep:true}};
+ assert.deepEqual(applyThinking(model,options,{type:'enabled'}),{reasoningEffort:'high',nested:{keep:true}});assert.equal(options.reasoningEffort,'none');
+ const positive={reasoningEffort:'low'};assert.equal(applyThinking(model,positive,{type:'enabled'}),positive);
+ const native={api:{npm:'custom-sdk'},variants:{low:{nativeThinking:true}}};assert.deepEqual(applyThinking(native,{}, {type:'enabled'}),{nativeThinking:true});
+ assert.equal(applyThinking(model,options,undefined),options);
+ const configured={api:{npm:'@ai-sdk/openai-compatible'},capabilities:{reasoning:false},options:{reasoningEffort:'xhigh'}};assert.equal(applyThinking(configured,configured.options,{type:'enabled'}),configured.options);
+});
+test('numeric thinking budgets reach only the native budget SDK and replace stale conditional settings',()=>{
+ const model={api:{npm:'@ai-sdk/anthropic'},capabilities:{reasoning:true},limit:{output:4096},variants:{high:{thinking:{type:'enabled',budgetTokens:1024}}}};
+ const original={thinking:{type:'adaptive',display:'omitted'},nested:{keep:true}};
+ const result=applyThinking(model,original,{type:'enabled',budget_tokens:2048});assert.deepEqual(result,{thinking:{type:'enabled',budgetTokens:2048},nested:{keep:true}});assert.equal(original.thinking.type,'adaptive');
+ assert.equal(applyThinking(model,{}, {type:'enabled'}).thinking.budgetTokens,1024);
+ assert.deepEqual(applyThinking(model,result,{type:'disabled'}).thinking,{type:'disabled'});
+ for(const budget of [1023,4096,1.5])assert.throws(()=>applyThinking(model,{}, {type:'enabled',budget_tokens:budget}),e=>e.status===400&&e.param==='thinking.budget_tokens');
+ const effortModel={api:{npm:'@ai-sdk/openai-compatible'},capabilities:{reasoning:true}};assert.throws(()=>applyThinking(effortModel,{}, {type:'enabled',budget_tokens:2048}),e=>e.status===400&&e.param==='thinking.budget_tokens');
+});
+test('thinking toggles reject unsupported models and contradictory native settings',()=>{
+ const model={api:{npm:'@ai-sdk/openai-compatible'},capabilities:{reasoning:true}};
+ assert.equal(applyThinking(model,{reasoningEffort:'high'},{type:'disabled'}).reasoningEffort,'none');
+ assert.throws(()=>applyThinking(model,{}, {type:'enabled'},'none'),e=>e.status===400);
+ assert.throws(()=>applyThinking(model,{}, {type:'disabled'},'high'),e=>e.status===400);
+ assert.throws(()=>applyThinking({api:{npm:'unknown-sdk'},capabilities:{reasoning:false}},{},{type:'enabled'}),e=>e.status===400);
+ assert.throws(()=>applyThinking({api:{npm:'@ai-sdk/anthropic'},capabilities:{reasoning:true}},{thinking:{type:'disabled'}},{type:'enabled'},'high'),e=>e.status===400);
+});
 
 test('custom effort mappings override native variants, merge SDK budgets, and leave defaults untouched',()=>{
   const model={api:{npm:'custom-native-sdk'},variants:{high:{thinking:{type:'enabled',budgetTokens:1024}}}};

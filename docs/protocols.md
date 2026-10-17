@@ -72,7 +72,21 @@ actually exposes; there is no provider-independent encrypted reasoning state.
 Anthropic answer text and tool blocks are streamed normally. Provider reasoning
 is **not** emitted as a thinking block because OpenCode cannot provide an
 Anthropic-verifiable signature. Thinking tokens still count in actual usage.
-Signed thinking history and fixed thinking budgets are explicitly unsupported.
+Signed thinking history remains unsupported. Anthropic and Chat clients can send
+`thinking:{"type":"enabled"}` without a budget as a mode toggle. The proxy keeps
+an already-enabled native default or selects an available positive OpenCode
+variant (preferring high, then medium/low). A known OpenAI SDK can use its native
+high effort when the model advertises reasoning without named variants. Explicit
+client effort wins; a conflicting disabled model default does not override the
+toggle. `thinking:{"type":"disabled"}` uses native disabled thinking or none
+effort, and does not require an Anthropic model to define a none variant.
+
+`thinking:{"type":"enabled","budget_tokens":N}` is a separate request: the
+numeric budget is preserved through the native Anthropic SDK as `budgetTokens`.
+It must be an integer of at least 1024 and below the request's output limit.
+SDKs that only expose effort levels reject numeric budgets explicitly instead of
+guessing an effort or discarding the budget. Unsupported thinking modes fail
+before supplier inference; omitted thinking controls preserve existing defaults.
 Adaptive thinking accepts `display:"omitted"`; signed thinking output is never
 invented for other display modes.
 `cache_control` blocks are accepted as client hints, but provider caching remains
@@ -110,3 +124,4 @@ Protocol references:
 - https://platform.claude.com/docs/en/build-with-claude/streaming
 - https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming
 - https://platform.claude.com/docs/en/api/models/list
+- https://api-docs.deepseek.com/guides/anthropic_api/

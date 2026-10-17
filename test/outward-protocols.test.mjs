@@ -67,6 +67,16 @@ test('Chat accepts harmless standard hints and still rejects unsupported guarant
  const body=toChatRequest('chat',client);validateRequest(body,{demo:{output:1000}});assert.deepEqual(body,request);assert.deepEqual(client,snapshot);
  for(const patch of [{store:true},{store:'false'},{user:{}},{metadata:[]},{stop:['END']},{parallel_tool_calls:false},{response_format:{type:'json_schema'}},{tool_choice:'required'}])assert.throws(()=>validateRequest(toChatRequest('chat',{...request,...patch}),{demo:{output:1000}}),e=>e.status===400);
 });
+test('Anthropic thinking mode toggles are distinct from numeric budgets and honor explicit effort',()=>{
+ const request={model:'demo',max_tokens:4096,messages:[{role:'user',content:'hello'}]};
+ for(const thinking of [{type:'enabled'},{type:'disabled'},{type:'enabled',budget_tokens:2048}]){
+  const client={...request,thinking},snapshot=structuredClone(client),body=toChatRequest('anthropic',client);validateRequest(body,{demo:{output:4096}});assert.deepEqual(body.thinking,thinking);assert.deepEqual(client,snapshot);
+ }
+ assert.equal(toChatRequest('anthropic',{...request,thinking:{type:'enabled'},output_config:{effort:'low'}}).reasoning_effort,'low');
+ for(const thinking of [null,{type:'invalid'},{type:'enabled',budget_tokens:1023},{type:'enabled',budget_tokens:4096},{type:'enabled',budget_tokens:1.5},{type:'disabled',budget_tokens:2048},{type:'adaptive',budget_tokens:2048}])assert.throws(()=>toChatRequest('anthropic',{...request,thinking}),e=>e.status===400);
+ assert.throws(()=>toChatRequest('anthropic',{...request,thinking:{type:'enabled'},output_config:{effort:'none'}}),e=>e.status===400);
+ assert.throws(()=>toChatRequest('anthropic',{...request,thinking:{type:'disabled'},output_config:{effort:'high'}}),e=>e.status===400);
+});
 test('Unsupported state, strict-output and signed-thinking semantics fail explicitly',()=>{
  for(const extra of [{previous_response_id:'resp_old'},{store:true},{text:{format:{type:'json_schema'}}},{input:[{role:'user',content:[{type:'input_image',image_url:'x'}]}]}])assert.throws(()=>toChatRequest('responses',{model:'demo',input:'hello',...extra}),e=>e.status===400);
  assert.throws(()=>toChatRequest('anthropic',{model:'demo',messages:[{role:'user',content:'hello'}],max_tokens:100,thinking:{type:'enabled',budget_tokens:100}}),e=>e.status===400);
