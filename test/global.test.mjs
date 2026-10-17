@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, rm, symlink, stat, realpath } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
+import { ProxyRuntime } from '../lib/runtime.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { createProxyServer } from '../lib/http-server.mjs';
@@ -817,6 +818,33 @@ test('reuse13: a slow downstream reader does not idle-timeout an upstream that h
     assert.equal(chunks.at(-1).choices[0].finish_reason,'stop');
     assert.equal(chunks.map(c=>c.choices[0]?.delta?.content??'').join(''),'你好🙂\n\n```python\n'+auditStream.tail.join(''));
   } finally {auditStream.release.resolve();await instance.close();}
+});
+
+test('protocol compatibility: real global OpenCode preserves Responses history and buffered Anthropic tools', {timeout:120000}, async()=>{
+  const {onFailure,...configuration}=options;
+  const runtime=new ProxyRuntime({file:path.join(home,'protocol-config.json'),settings:{...configuration,host:'127.0.0.1',port:0,modelOverrides:{},apiKeys:[{id:'test',name:'fixture',key:'fixture-protocol-key',enabled:true}],models:{friendly:{model:'fixture-api/mock',context:100000,output:1000},native:{model:'fixture-anthropic/native-thinking',context:100000,output:4096}}}});
+  try{
+    await runtime.startGateway();const base=runtime.state().endpoint,headers={authorization:'Bearer fixture-protocol-key','content-type':'application/json'};
+    const send=async(route,body)=>{const response=await fetch(base+'/'+route,{method:'POST',headers,body:JSON.stringify(body)});assert.equal(response.status,200,response.status===200?'':await response.text());return response;};
+    const before=requests.length,models=await fetch(base+'/models',{headers:{'x-api-key':'fixture-protocol-key','anthropic-version':'2023-06-01'}}).then(r=>r.json());assert.ok(models.data.some(m=>m.id==='friendly'&&m.type==='model'));assert.equal(requests.length,before);
+    for(const stream of [false,true]){
+      const first=await send('responses',{model:'friendly',input:'AUDIT_REASONING',stream,store:false,include:['reasoning.encrypted_content'],dsh_plugin_packages:{version:1,packages:[{name:'fixture',version:'1.0'}]}});let result;
+      if(stream){for await(const event of sseEvents(first.body))if(event.type==='response.completed')result=event.response;}else result=await first.json();
+      assert.ok(result.output.some(item=>item.type==='reasoning'));
+      const follow=await send('responses',{model:'friendly',store:false,input:[{role:'user',content:'AUDIT_REASONING'},...result.output,{role:'user',content:'continue'}]});await follow.text();
+      assert.ok(requests.at(-1).body.messages.some(m=>m.role==='assistant'&&m.reasoning_content==='思考中。'));
+      assert.ok(requests.at(-1).body.messages.some(m=>m.role==='assistant'&&m.content==='结论。'));
+      assert.equal(requests.at(-1).body.dsh_plugin_packages,undefined);
+    }
+    const schema={type:'object',properties:{city:{type:'string'}}};
+    const tools=await send('messages',{model:'friendly',max_tokens:100,stream:true,messages:[{role:'user',content:'CALL_TOOLS'}],tools:['weather','clock'].map(name=>({type:'custom',name,input_schema:schema,eager_input_streaming:true}))});
+    const events=await Array.fromAsync(sseEvents(tools.body));assert.equal(events.at(-1).type,'message_stop');assert.equal(events.filter(e=>e.type==='content_block_start'&&e.content_block.type==='tool_use').length,2);assert.ok(events.some(e=>e.type==='message_delta'&&e.delta.stop_reason==='tool_use'));
+    assert.equal(requests.at(-1).body.tools.some(t=>'eager_input_streaming' in t),false);
+    const native=await send('messages',{model:'native',max_tokens:100,top_k:31,messages:[{role:'user',content:'Hello'}]});await native.text();assert.equal(requests.at(-1).body.top_k,31);
+    const chat=await send('chat/completions',{model:'friendly',messages:[{role:'user',content:'hello'}],user:'sdk-user',metadata:{client:'sdk'},store:false,parallel_tool_calls:true,response_format:{type:'text'}});await chat.text();
+    for(const field of ['user','metadata','store','parallel_tool_calls','response_format'])assert.equal(requests.at(-1).body[field],undefined);
+    assert.equal(runtime.current.active,0);
+  }finally{await runtime.close();}
 });
 
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{

@@ -9,6 +9,27 @@ async function fixture(bridge,run) {
   finally {await server.shutdown();}
 }
 const auth={authorization:'Bearer fixture-client-key'};
+
+test('browser preflight allows SDK headers while actual requests still require a key',async()=>{
+  let calls=0;
+  await fixture({close:async()=>{},fetch:async()=>{calls++;return Response.json({ok:true});}},async base=>{
+    const response=await fetch(base+'/v1/messages',{method:'OPTIONS',headers:{origin:'http://localhost:3000','access-control-request-method':'POST','access-control-request-headers':'content-type,x-api-key,anthropic-version,x-stainless-lang'}});
+    assert.equal(response.status,204);assert.equal(response.headers.get('access-control-allow-origin'),'*');assert.match(response.headers.get('access-control-allow-headers'),/x-stainless-lang/);assert.equal(calls,0);
+    const rejected=await fetch(base+'/v1/messages',{method:'POST',headers:{origin:'http://localhost:3000'},body:'{}'});assert.equal(rejected.status,401);assert.equal(rejected.headers.get('access-control-allow-origin'),'*');await rejected.text();assert.equal(calls,0);
+    const accepted=await fetch(base+'/v1/messages',{method:'POST',headers:{origin:'http://localhost:3000','x-api-key':'fixture-client-key'},body:'{}'});assert.equal(accepted.status,200);await accepted.text();assert.equal(calls,1);assert.equal(accepted.headers.get('access-control-allow-credentials'),null);
+  });
+});
+
+test('x-api-key authenticates model discovery and never overrides a supplied invalid Bearer key',async()=>{
+  let calls=0;
+  await fixture({close:async()=>{},fetch:async()=>{calls++;return Response.json({});}},async base=>{
+    const response=await fetch(base+'/v1/models',{headers:{'x-api-key':'fixture-client-key'}});assert.equal(response.status,200);await response.text();assert.equal(calls,1);
+    for(const headers of [{'x-api-key':'wrong-key'},{'x-api-key':'fixture-client-key',authorization:'Bearer wrong-key'}]){
+      const rejected=await fetch(base+'/v1/models',{headers});assert.equal(rejected.status,401);assert.equal((await rejected.json()).error.type,'authentication_error');
+    }
+    assert.equal(calls,1);
+  });
+});
 test('HTTP authentication rejects requests before reaching OpenCode',async()=>{
   let calls=0;
   await fixture({close:async()=>{},fetch:async()=>{calls++;return Response.json({});}},async base=>{

@@ -39,6 +39,8 @@ ssh -L 8788:127.0.0.1:8788 user@server
 
 Cherry Studio 等客户端填写 API 地址与访问 Key，再刷新模型列表。支持 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`。Anthropic SDK 使用不含 /v1 的根地址。首次启动自动生成访问 Key；它与供应商凭证不同。
 
+三种接口提供文本与函数工具的兼容子集。Responses 支持将返回的 output 原样加入多轮历史；Anthropic 支持常见流式工具参数。模型列表和单模型查询按客户端返回 OpenAI 或 Anthropic 格式，API 支持浏览器 CORS。尚不支持的状态存储、严格 JSON、加密推理及 Token 预估等能力详见 [协议说明](docs/protocols.md)。
+
 不再采集持久化统计、不将提示词、工具参数及原始请求/响应保存为请求日志；不读取、不删除旧统计文件或请求记录。管理界面不提供统计、请求日志或有效请求视图。响应中真实 usage 仍转发。必要的进程错误和可选诊断仍可输出到终端；Windows 桌面端将服务的标准错误输出写入配置目录下的 `desktop.log`，用于启动与运行故障排查。
 
 - 不限制 OpenCode 版本，兼容性由其公开 API/hooks 决定。

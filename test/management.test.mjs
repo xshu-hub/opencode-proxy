@@ -7,6 +7,7 @@ import http from 'node:http';
 import {validateSettings,withModelDefaults} from '../lib/settings.mjs';
 import {ProxyRuntime} from '../lib/runtime.mjs';
 import {createAdminServer} from '../lib/admin-server.mjs';
+import {sseEvents,validateRequest} from '../lib/protocol.mjs';
 
 const config=()=>({mode:'global',host:'127.0.0.1',port:0,diagnostics:false,apiKeys:[{id:'test',name:'测试客户端',key:'fixture-access-key',enabled:true}],modelOverrides:{}});
 class Bridge{
@@ -33,6 +34,57 @@ test('model aliases/defaults, key changes survive atomic save without killing ac
   assert.equal('statistics' in runtime.state(),false);assert.deepEqual((await readdir(directory)).sort(),['config.json']);
   await runtime.release(old);assert.equal(old.bridge.closed,true);
 }));
+test('gateway accepts DSH inventory for normal and streaming requests on all three routes',async()=>fixture(async({runtime})=>{
+  const seen=[];
+  runtime.current.bridge.fetch=async(url,init)=>{
+    const body=JSON.parse(init.body);validateRequest(body,runtime.current.bridge.acceptedModels);seen.push({url,body});
+    if(!body.stream)return Response.json({choices:[{message:{content:'fixture answer'},finish_reason:'stop'}]});
+    const chunks=[{choices:[{index:0,delta:{content:'fixture answer'},finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:'stop'}]}];
+    return new Response(chunks.map(chunk=>'data: '+JSON.stringify(chunk)+'\n\n').join('')+'data: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}});
+  };
+  await runtime.startGateway();const base=runtime.state().endpoint;
+  const headers={authorization:'Bearer fixture-access-key','content-type':'application/json'};
+  for(const [route,request,completion] of [
+    ['chat/completions',{messages:[{role:'user',content:'hello'}]},undefined],
+    ['responses',{input:'hello'},'response.completed'],
+    ['messages',{messages:[{role:'user',content:'hello'}],max_tokens:100},'message_stop'],
+  ])for(const stream of [false,true]){
+    const body={model:'mock',...request,stream,dsh_plugin_packages:{version:1,packages:[{name:'@deepseek-ai/dsh-example',version:'0.1.1-rc.2'}]}};
+    const response=await fetch(base+'/'+route,{method:'POST',headers,body:JSON.stringify(body)});assert.equal(response.status,200);
+    if(stream){const events=[];for await(const event of sseEvents(response.body))events.push(event);assert.match(JSON.stringify(events),/fixture answer/);if(completion)assert.equal(events.at(-1).type,completion);else assert.equal(events.at(-1).choices[0].finish_reason,'stop');}
+    else assert.match(JSON.stringify(await response.json()),/fixture answer/);
+    assert.equal(Object.hasOwn(seen.at(-1).body,'dsh_plugin_packages'),false);assert.equal(new URL(seen.at(-1).url).pathname,'/v1/chat/completions');
+  }
+  assert.equal(seen.length,6);assert.equal(runtime.current.active,0);
+  const unauthorized=await fetch(base+'/responses',{method:'POST',body:JSON.stringify({model:'mock',input:'hello',dsh_plugin_packages:{version:1,packages:[]}})});assert.equal(unauthorized.status,401);await unauthorized.text();assert.equal(seen.length,6);
+}));
+
+test('model discovery supports Anthropic keys, pagination and retrieval with the same enabled aliases',async()=>fixture(async({runtime})=>{
+  runtime.Bridge=class extends Bridge{
+    constructor(config){super(config);for(const id of ['second','third']){const model={model:'fixture/'+id,name:id,context:100000,output:1000};this.config.models[id]=model;this.acceptedModels[id]=model;this.acceptedModels[model.model]=model;}}
+  };
+  await runtime.refresh();await runtime.updateModel('fixture/mock',{alias:'friendly'});await runtime.updateModel('fixture/third',{enabled:false});
+  let inferred=0;runtime.current.bridge.fetch=async()=>{inferred++;throw new Error('Discovery must not infer.');};
+  await runtime.startGateway();const base=runtime.state().endpoint;
+  const native={'x-api-key':'fixture-access-key','anthropic-version':'2023-06-01'},bearer={authorization:'Bearer fixture-access-key'};
+  const get=async(suffix,headers=native)=>{const response=await fetch(base+suffix,{headers});assert.equal(response.status,200,await(response.status===200?Promise.resolve(''):response.text()));assert.equal(response.headers.get('cache-control'),'no-store');assert.match(response.headers.get('vary'),/anthropic-version/);return response.json();};
+  const all=await get('/models');assert.deepEqual(all.data.map(m=>m.id),['friendly','second']);assert.equal(all.has_more,false);assert.equal(all.first_id,'friendly');assert.equal(all.last_id,'second');assert.equal(all.data[0].type,'model');assert.equal(all.data[0].display_name,'模型');assert.equal(all.data[0].max_input_tokens,100000);assert.equal(all.data[0].max_tokens,1000);assert.equal(all.data[0].capabilities,null);assert.ok(!JSON.stringify(all).includes('fixture/'));
+  const first=await get('/models?limit=1');assert.equal(first.has_more,true);assert.deepEqual(first.data.map(m=>m.id),['friendly']);
+  const second=await get('/models?after_id=friendly&limit=1');assert.equal(second.has_more,false);assert.deepEqual(second.data.map(m=>m.id),['second']);
+  assert.deepEqual((await get('/models?before_id=second&limit=1')).data,first.data);
+  const empty=await get('/models?after_id=second');assert.deepEqual(empty,{data:[],has_more:false,first_id:null,last_id:null});
+  assert.deepEqual(await get('/models/friendly'),all.data[0]);assert.deepEqual(await get('/models',{'x-api-key':'fixture-access-key'}),all);
+  assert.deepEqual(await get('/models',{...bearer,'anthropic-version':'2023-06-01'}),all);
+  const openai=await get('/models',bearer);assert.equal(openai.object,'list');assert.deepEqual(openai.data.map(m=>m.id),['friendly','second']);assert.equal(openai.data[0].object,'model');assert.equal((await get('/models/friendly',bearer)).object,'model');
+  for(const suffix of ['/models?limit=0','/models?limit=1001','/models?limit=1.5','/models?limit=1&limit=2','/models?after_id=missing','/models?before_id=friendly&after_id=second']){
+    const response=await fetch(base+suffix,{headers:native});assert.equal(response.status,400);assert.equal((await response.json()).error.type,'invalid_request_error');
+  }
+  for(const id of ['missing','third','mock','fixture%2Fmock']){const response=await fetch(base+'/models/'+id,{headers:native});assert.equal(response.status,404);assert.equal((await response.json()).error.type,'not_found_error');}
+  for(const headers of [native,bearer]){const response=await fetch(base+'/messages/count_tokens',{method:'POST',headers,body:JSON.stringify({model:'friendly',messages:[{role:'user',content:'hello'}]})});assert.equal(response.status,501);const error=await response.json();assert.equal(error.type,'error');assert.match(error.error.message,/no token-count endpoint/);}
+  assert.equal(inferred,0);assert.equal(runtime.current.active,0);
+  await runtime.updateModel(['fixture/mock','fixture/second'],{enabled:false});const disabled=await get('/models');assert.deepEqual(disabled,{data:[],has_more:false,first_id:null,last_id:null});assert.deepEqual((await get('/models',bearer)).data,[]);
+}));
+
 test('stale model overrides do not block the catalog and return when OpenCode lists the model again',async()=>fixture(async({runtime,base,directory})=>{
   const retired={alias:'retired-short',enabled:false,output:500,defaults:{temperature:0.6}};
   await runtime.save({...runtime.settings,modelOverrides:{'fixture/retired':retired,'fixture/mock':{alias:'friendly',defaults:{temperature:0.4}}}});
