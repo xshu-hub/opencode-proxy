@@ -25,6 +25,7 @@ const workingDirectory = path.join(home, 'workspace 中文 with spaces');
 const observations = async () => (await readFile(observationsFile, 'utf8')).trim().split('\n').map(JSON.parse);
 const requests = [];
 const faultAttempts=new Map();
+const dsmlCode='const g1 = await tools.grep({ pattern: "SessionRetry|Retry\\.policy|retryable\\(", path: "packages/opencode/src", include: "*.ts" })\nconsole.log(g1.matches.map(m=>m.path+":"+m.lineNumber+": "+m.line).join("\\n"))';
 let refreshes = 0;
 let parallelRequests;
 let pausedStream;
@@ -81,7 +82,12 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if(body.tools?.some(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name))){
+  if(body.messages.some(m=>m.content==='GLOBAL_DSML_RECOVERY')&&!body.messages.some(m=>m.role==='tool')){
+    const tool=body.tools.find(t=>t.function.name===nativeToolName('run_code'));
+    const text='<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="'+tool.function.name+'"> <｜｜DSML｜｜ parameter name="code" string="true">'+dsmlCode+'</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name="description" string="true">Find retry policy usage sites</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>';
+    for(let i=0;i<text.length;i+=17){emit({content:text.slice(i,i+17)});await delay(2);}
+    emit({},'stop',{prompt_tokens:10,completion_tokens:30,total_tokens:40});
+  }else if(body.tools?.some(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name))){
     const forced=body.messages.some(m=>m.content==='GLOBAL_NATIVE_FORCE');
     emit({tool_calls:[{index:0,id:'structured-native',type:'function',function:{name:body.tools.find(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name)).function.name,arguments:JSON.stringify(forced?{calls:[{name:'weather',arguments:{city:'北京'}}]}:{answer:42})}}]});
     emit({},'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
@@ -938,6 +944,36 @@ test('inline image parts cross all protocol adapters and the real OpenCode SDK w
  }}finally{await runtime.close();}
 });
 
+test('global DSML leaked text becomes client tools and tool results continue through real OpenCode in all protocols', {timeout:120000}, async()=>{
+  const runtime=new ProxyRuntime({file:path.join(home,'dsml-settings.json'),settings:{...options,onFailure:undefined,workerReuse:true,host:'127.0.0.1',port:0,modelOverrides:{},models:{demo:{model:'fixture-api/mock',context:100000,output:1000}},apiKeys:[]}});
+  const parameters={type:'object',properties:{code:{type:'string'},description:{type:'string'}},required:['code','description'],additionalProperties:false};
+  try{for(const protocol of ['chat','responses','anthropic'])for(const stream of [false,true]){
+    const tools=protocol==='chat'?[{type:'function',function:{name:'run_code',parameters}}]:protocol==='responses'?[{type:'function',name:'run_code',parameters}]:[{name:'run_code',input_schema:parameters}];
+    const body={model:'demo',tools,stream,...(protocol==='responses'?{input:'GLOBAL_DSML_RECOVERY',store:false}:{messages:[{role:'user',content:'GLOBAL_DSML_RECOVERY'}],...(protocol==='anthropic'?{max_tokens:500}:{})})};
+    const route='http://proxy/v1/'+({chat:'chat/completions',responses:'responses',anthropic:'messages'}[protocol]);
+    const first=await runtime.fetch(route,{method:'POST',body:JSON.stringify(body)});assert.equal(first.status,200,first.status===200?'':await first.text());
+    const events=stream?await Array.fromAsync(sseEvents(first.body)):undefined,result=stream?undefined:await first.json();let next;
+    assert.ok(!JSON.stringify(events??result).includes('DSML'));assert.ok(!events?.some(e=>e.error),JSON.stringify(events));
+    if(protocol==='chat'){
+      const message=stream?{role:'assistant',content:null,tool_calls:events.flatMap(e=>e.choices?.[0]?.delta.tool_calls??[]).map(({index,...c})=>c)}:result.choices[0].message;
+      assert.equal(stream?events.find(e=>e.choices?.[0]?.finish_reason)?.choices[0].finish_reason:result.choices[0].finish_reason,'tool_calls');
+      const call=message.tool_calls[0];assert.equal(call.function.name,'run_code');assert.equal(JSON.parse(call.function.arguments).code,dsmlCode);
+      next={...body,stream:false,messages:[...body.messages,message,{role:'tool',tool_call_id:call.id,content:'retry policy found'}]};
+    }else if(protocol==='responses'){
+      const response=stream?events.at(-1).response:result,call=response.output.find(i=>i.type==='function_call');assert.equal(call.name,'run_code');assert.equal(JSON.parse(call.arguments).code,dsmlCode);
+      next={...body,stream:false,input:[{role:'user',content:body.input},...response.output,{type:'function_call_output',call_id:call.call_id,output:'retry policy found'}]};
+    }else{
+      assert.equal(stream?events.find(e=>e.type==='message_delta').delta.stop_reason:result.stop_reason,'tool_use');
+      const start=stream?events.find(e=>e.type==='content_block_start'&&e.content_block.type==='tool_use'):undefined;
+      const call=stream?{...start.content_block,input:JSON.parse(events.filter(e=>e.type==='content_block_delta'&&e.index===start.index&&e.delta.type==='input_json_delta').map(e=>e.delta.partial_json).join(''))}:result.content.find(b=>b.type==='tool_use');
+      assert.equal(call.name,'run_code');assert.equal(call.input.code,dsmlCode);
+      next={...body,stream:false,messages:[...body.messages,{role:'assistant',content:[call]},{role:'user',content:[{type:'tool_result',tool_use_id:call.id,content:'retry policy found'}]}]};
+    }
+    const reply=await runtime.fetch(route,{method:'POST',body:JSON.stringify(next)}),answer=await reply.json();assert.equal(reply.status,200,JSON.stringify(answer));assert.match(JSON.stringify(answer),/全局 OpenCode/);
+    const history=requests.at(-1).body.messages;assert.equal(history.find(m=>m.role==='tool').content,'retry policy found');assert.equal(JSON.parse(history.find(m=>m.tool_calls?.length).tool_calls[0].function.arguments).code,dsmlCode);
+  }}finally{await runtime.close();}
+});
+
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{
   if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate the packaged server.');return;}
   const file=path.join(home,'managed-config.json');
@@ -967,6 +1003,9 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     assert.equal(requests.at(-1).body.temperature,0.4);assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
     assert.equal(await readFile(path.join(home,'statistics.json'),'utf8').catch(()=>null),null);
     assert.equal((await admin('/admin/request/removed')).status,404);
+    const dsmlTools=[{name:'run_code',input_schema:{type:'object',properties:{code:{type:'string'},description:{type:'string'}},required:['code','description'],additionalProperties:false}}];
+    const dsml=await fetch(state.endpoint+'/messages',{method:'POST',headers:{'x-api-key':'fixture-client-access-key','anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify({model:'desktop-model',max_tokens:100,stream:true,tools:dsmlTools,messages:[{role:'user',content:'GLOBAL_DSML_RECOVERY'}]})});
+    assert.equal(dsml.status,200);const dsmlEvents=await Array.fromAsync(sseEvents(dsml.body));assert.ok(!JSON.stringify(dsmlEvents).includes('DSML'));assert.equal(dsmlEvents.find(e=>e.type==='message_delta').delta.stop_reason,'tool_use');const dsmlCall=dsmlEvents.find(e=>e.type==='content_block_start'&&e.content_block.type==='tool_use');assert.equal(dsmlCall.content_block.name,'run_code');assert.equal(JSON.parse(dsmlEvents.filter(e=>e.index===dsmlCall.index&&e.delta?.type==='input_json_delta').map(e=>e.delta.partial_json).join('')).code,dsmlCode);
     for(const protocol of ['responses','anthropic']){
       const externalTools=tools.map(t=>protocol==='responses'?{type:'function',...t.function}:{name:t.function.name,input_schema:t.function.parameters});
       const firstBody={model:'desktop-model',stream:true,tools:externalTools,...(protocol==='responses'?{input:'Call tools',instructions:'PROTOCOL_SYSTEM_SENTINEL',store:false}:{max_tokens:100,system:'PROTOCOL_SYSTEM_SENTINEL',messages:[{role:'user',content:'Call tools'}]})};

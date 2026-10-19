@@ -30,7 +30,7 @@
     "opencode"
   ],
   "scripts": {
-    "test": "node --test test/unit.test.mjs test/command.test.mjs test/reasoning.test.mjs test/thinking-choice.test.mjs test/catalog.test.mjs test/stream.test.mjs test/lifecycle.test.mjs test/http-server.test.mjs test/management.test.mjs test/outward-protocols.test.mjs test/compatibility.test.mjs test/frontend.test.mjs",
+    "test": "node --test test/unit.test.mjs test/command.test.mjs test/reasoning.test.mjs test/thinking-choice.test.mjs test/catalog.test.mjs test/stream.test.mjs test/lifecycle.test.mjs test/http-server.test.mjs test/management.test.mjs test/outward-protocols.test.mjs test/compatibility.test.mjs test/dsml-tools.test.mjs test/frontend.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/global.test.mjs",
     "start": "node bin/serve.mjs",
     "build:ui": "npm run build --prefix frontend",

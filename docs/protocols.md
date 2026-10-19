@@ -152,6 +152,17 @@ request-log or effective-request views.
 Stream-start envelopes and heartbeats do not count as first output. Partial
 stream errors emit the protocol's error event and never a successful completion.
 Downstream cancellation cancels the OpenCode request.
+If a provider leaks a DeepSeek DSML call batch as ordinary assistant text, the
+proxy can recover a complete batch at the start of the answer into standard
+client tool calls (including Anthropic `tool_use` and `stop_reason: tool_use`).
+Only native tool names advertised on the current request are eligible; arguments
+must match their JSON Schema, and the full batch is validated before emission.
+String parameters are preserved literally, without XML entity decoding or code
+execution. Recovery buffers at most 1 MiB and 128 calls. Incomplete, unknown,
+invalid or interrupted batches fail explicitly instead of ending successfully
+with raw markup. Fenced examples and markup embedded in ordinary prose remain
+text. With no eligible tools or `tool_choice: none`, recovery is disabled. The
+proxy still executes no client functions and adds no supplier inference/retry.
 OpenCode owns transport retries. Before the first text/reasoning/tool output, the
 proxy permits up to two native retries, bounded by existing timeout settings;
 the third retry notification or an excessive retry delay returns 429/503 and a

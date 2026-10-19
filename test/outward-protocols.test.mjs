@@ -5,6 +5,34 @@ import {sseEvents,validateRequest} from '../lib/protocol.mjs';
 const usage={prompt_tokens:22,completion_tokens:12,total_tokens:34,prompt_tokens_details:{cached_tokens:7,cache_write_tokens:5},completion_tokens_details:{reasoning_tokens:2}};
 const choice=(delta,finish_reason=null)=>({choices:[{index:0,delta,finish_reason}]});
 function source(chunks,split=7){let bytes=new TextEncoder().encode(chunks.map(c=>'data: '+JSON.stringify(c)+'\r\n\r\n').join('')+'data: [DONE]\r\n\r\n'),index=0;return new Response(new ReadableStream({pull(c){if(index>=bytes.length)c.close();else c.enqueue(bytes.slice(index,index+=split));}}),{headers:{'content-type':'text/event-stream'}});}
+
+// Cross-check the protocol invariants highlighted by sub2api's parallel-tool
+// and first-chunk argument regression cases, using our own native bridge shape.
+for(const protocol of ['responses','anthropic'])test(`${protocol} interleaved tools keep indices, empty inputs and first-chunk arguments exactly once`,async()=>{
+ const expected=new Map([['first',{name:'run_code',input:{code:'x\n&lt;🙂'}}],['second',{name:'lookup',input:{city:'北京'}}],['third',{name:'empty',input:{}}]]);
+ const chunks=[choice({content:'Looking up.'}),choice({tool_calls:[{index:0,id:'first',function:{name:'run_code',arguments:JSON.stringify(expected.get('first').input)}}]}),choice({tool_calls:[{index:1,id:'second',function:{name:'lookup',arguments:'{"city":'}}]}),choice({tool_calls:[{index:2,id:'third',function:{name:'empty',arguments:'{}'}}]}),choice({tool_calls:[{index:1,function:{arguments:'"北京"}'}}]}),choice({},'tool_calls'),{choices:[],usage}];
+ const response=await adaptResponse(protocol,source(chunks,1),{model:'demo',stream:true}),events=await Array.fromAsync(sseEvents(response.body));
+ assert.ok(!events.some(e=>e.type==='error'));const active=new Map(),assembled=new Map();
+ if(protocol==='anthropic'){
+  for(const e of events){
+   if(e.type==='content_block_start'){assert.equal(active.has(e.index),false);assert.ok(Number.isInteger(e.index));active.set(e.index,e.content_block.type);if(e.content_block.type==='tool_use')assembled.set(e.index,{...e.content_block,args:''});}
+   if(e.type==='content_block_delta'){assert.ok(active.has(e.index),'delta must target an open block');if(e.delta.type==='input_json_delta')assembled.get(e.index).args+=e.delta.partial_json;}
+   if(e.type==='content_block_stop'){assert.ok(active.delete(e.index),'each block closes exactly once');}
+  }
+  assert.equal(active.size,0);assert.equal(events[1].index,0);assert.equal(events.find(e=>e.type==='message_delta').delta.stop_reason,'tool_use');
+  for(const item of assembled.values()){const wanted=expected.get(item.id);assert.equal(item.name,wanted.name);assert.deepEqual(JSON.parse(item.args),wanted.input);}
+ }else{
+  for(const e of events){
+   if(e.type==='response.output_item.added'){active.set(e.output_index,e.item.type);if(e.item.type==='function_call')assembled.set(e.output_index,{...e.item,args:''});}
+   if(e.type==='response.function_call_arguments.delta'){assert.equal(active.get(e.output_index),'function_call');assembled.get(e.output_index).args+=e.delta;}
+   if(e.type==='response.function_call_arguments.done'){assert.equal(e.arguments,assembled.get(e.output_index).args);}
+   if(e.type==='response.output_item.done'){assert.ok(active.delete(e.output_index));if(e.item.type==='function_call')assert.equal(e.item.arguments,assembled.get(e.output_index).args);}
+  }
+  assert.equal(active.size,0);const text=events.find(e=>e.type==='response.output_text.delta');assert.equal(text.output_index,0);assert.equal(text.content_index,0);assert.equal(events.at(-1).type,'response.completed');
+  for(const item of assembled.values()){const wanted=expected.get(item.call_id);assert.equal(item.name,wanted.name);assert.deepEqual(JSON.parse(item.args),wanted.input);}
+ }
+ assert.equal(assembled.size,3);
+});
 test('Responses history preserves system, parallel calls and reversed tool results',()=>{
  const body=toChatRequest('responses',{model:'demo',instructions:'system',input:[{role:'user',content:[{type:'input_text',text:'北京'}]},{type:'function_call',call_id:'a',name:'weather',arguments:'{}'},{type:'function_call',call_id:'b',name:'clock',arguments:'{}'},{type:'function_call_output',call_id:'b',output:'time'},{type:'function_call_output',call_id:'a',output:'sunny'}],max_output_tokens:100,reasoning:{effort:'high'},parallel_tool_calls:true,store:false});
  validateRequest(body,{demo:{output:1000}});assert.equal(body.messages[2].tool_calls.length,2);assert.equal(body.messages[3].tool_call_id,'b');assert.equal(body.reasoning_effort,'high');assert.equal(body.max_completion_tokens,100);
