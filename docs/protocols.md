@@ -198,15 +198,24 @@ file removal finish in the background, and only then can that exclusive process
 be acquired again. Failed resets discard the process. Shutdown drains tracked
 recycling; unsuccessful/interrupted requests still await safe cancellation.
 If a provider leaks a DeepSeek DSML call batch as ordinary assistant text, the
-proxy can recover a complete batch at the start of the answer into standard
+proxy can recover a complete batch at the start of the answer or on its own line
+after introductory prose into standard
 client tool calls (including Anthropic `tool_use` and `stop_reason: tool_use`).
-Only native tool names advertised on the current request are eligible; arguments
+Introductory prose continues streaming immediately and is preserved once in the
+assistant history; it is not buffered until the batch completes. Only native tool
+names or unambiguous original client names declared on the current request are
+eligible. Original names map back to the same registered native tool; arguments
 must match their JSON Schema, and the full batch is validated before emission.
 String parameters are preserved literally, without XML entity decoding or code
 execution. Recovery buffers at most 1 MiB and 128 calls. Incomplete, unknown,
 invalid or interrupted batches fail explicitly instead of ending successfully
-with raw markup. Fenced examples and markup embedded in ordinary prose remain
-text. With no eligible tools or `tool_choice: none`, recovery is disabled. The
+with raw markup. Inline markup, Markdown fences/code spans, indented code,
+quotes and explicitly labelled examples remain text. Recognition is deliberately
+conservative: a standalone batch outside those contexts is required, with up to
+three leading spaces; ambiguous example/syntax descriptions are not promoted to
+calls. Per-line context is bounded to 4096 characters; after an overlong line,
+further markup stays literal for that response instead of guessing its quoting
+context. With no eligible tools or `tool_choice: none`, recovery is disabled. The
 proxy still executes no client functions and adds no supplier inference/retry.
 OpenCode owns transport retries. Before the first text/reasoning/tool output, the
 proxy permits up to two native retries, bounded by existing timeout settings;

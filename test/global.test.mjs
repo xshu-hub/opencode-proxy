@@ -33,6 +33,10 @@ const advancedTools=[{type:'namespace',name:'crm',tools:[{type:'function',name:'
 const advancedNames=toChatRequest('responses',{input:'hello',tools:advancedTools}).tools.map(t=>t.function.name);
 const faultAttempts=new Map();
 const dsmlCode='const g1 = await tools.grep({ pattern: "SessionRetry|Retry\\.policy|retryable\\(", path: "packages/opencode/src", include: "*.ts" })\nconsole.log(g1.matches.map(m=>m.path+":"+m.lineNumber+": "+m.line).join("\\n"))';
+const dsmlPreface="I'll start by exploring the directory to understand what rule set files we're working with.\n\n";
+const dsmlShellCommand=
+  String.raw`Get-ChildItem -LiteralPath 'D:\f30079819\Downloads\规则集' -Recurse | Select-Object FullName, Length, Extension` +
+  ' | Format-Table -AutoSize';
 let refreshes = 0;
 let parallelRequests;
 let pausedStream;
@@ -95,11 +99,32 @@ const upstream = http.createServer(async (req, res) => {
     if(body.messages.some(m=>m.role==='tool'))emit({content:'ADVANCED_OK'});
     else for(const [index,name] of advancedNames.entries())emit({tool_calls:[{index,id:'advanced_'+index,type:'function',function:{name:nativeToolName(name),arguments:JSON.stringify(index===0?{city:'北京'}:{input:'print("北京🙂")\n'})}}]});
     emit({},body.messages.some(m=>m.role==='tool')?'stop':'tool_calls',{prompt_tokens:10,completion_tokens:20,total_tokens:30});
-  }else if(body.messages.some(m=>m.content==='GLOBAL_DSML_RECOVERY')&&!body.messages.some(m=>m.role==='tool')){
-    const tool=body.tools.find(t=>t.function.name===nativeToolName('run_code'));
-    const text='<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="'+tool.function.name+'"> <｜｜DSML｜｜ parameter name="code" string="true">'+dsmlCode+'</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name="description" string="true">Find retry policy usage sites</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>';
-    for(let i=0;i<text.length;i+=17){emit({content:text.slice(i,i+17)});await delay(2);}
-    emit({},'stop',{prompt_tokens:10,completion_tokens:30,total_tokens:40});
+  } else if (
+    body.messages.some((m) => ['GLOBAL_DSML_RECOVERY', 'GLOBAL_DSML_PREFIX_RECOVERY'].includes(m.content)) &&
+    !body.messages.some((m) => m.role === 'tool')
+  ) {
+    const tool = body.tools.find((t) => t.function.name === nativeToolName('run_code'));
+    const prefixed = body.messages.some((m) => m.content === 'GLOBAL_DSML_PREFIX_RECOVERY');
+    const shell = prefixed
+      ? '<｜｜DSML｜｜ invoke name="pwsh"><｜｜DSML｜｜ parameter name="command" string="true">' +
+        dsmlShellCommand +
+        '</｜｜DSML｜｜ parameter><｜｜DSML｜｜ parameter name="description" string="true">List files in the rule set directory</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>'
+      : '';
+    const text =
+      (prefixed ? dsmlPreface : '') +
+      '<｜｜DSML｜｜ calls>' +
+      shell +
+      ' <｜｜DSML｜｜ invoke name="' +
+      tool.function.name +
+      '"> <｜｜DSML｜｜ parameter name="code" string="true">' +
+      dsmlCode +
+      '</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name="description" string="true">Find retry policy usage sites' +
+      '</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>';
+    for (let i = 0; i < text.length; i += 17) {
+      emit({ content: text.slice(i, i + 17) });
+      await delay(2);
+    }
+    emit({}, 'stop', { prompt_tokens: 10, completion_tokens: 30, total_tokens: 40 });
   }else if(body.tools?.some(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name))){
     const forced=body.messages.some(m=>m.content==='GLOBAL_NATIVE_FORCE');
     emit({tool_calls:[{index:0,id:'structured-native',type:'function',function:{name:body.tools.find(t=>['StructuredOutput','bridge_structured_output'].includes(t.function.name)).function.name,arguments:JSON.stringify(forced?{calls:[{name:'weather',arguments:{city:'北京'}}]}:{answer:42})}}]});
@@ -1030,6 +1055,186 @@ test('global DSML leaked text becomes client tools and tool results continue thr
     const history=requests.at(-1).body.messages;assert.equal(history.find(m=>m.role==='tool').content,'retry policy found');assert.equal(JSON.parse(history.find(m=>m.tool_calls?.length).tool_calls[0].function.arguments).code,dsmlCode);
   }}finally{await runtime.close();}
 });
+
+test(
+  'global prefixed DSML preserves prose, raw client names and parallel results through all protocols',
+  { timeout: 120000 },
+  async () => {
+    const runtime = new ProxyRuntime({
+      file: path.join(home, 'dsml-prefix-settings.json'),
+      settings: {
+        ...options,
+        onFailure: undefined,
+        workerReuse: true,
+        host: '127.0.0.1',
+        port: 0,
+        modelOverrides: {},
+        models: { demo: { model: 'fixture-api/mock', context: 100000, output: 1000 } },
+        apiKeys: []
+      }
+    });
+    const definitions = [
+      {
+        name: 'pwsh',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string' }, description: { type: 'string' } },
+          required: ['command', 'description'],
+          additionalProperties: false
+        }
+      },
+      {
+        name: 'run_code',
+        parameters: {
+          type: 'object',
+          properties: { code: { type: 'string' }, description: { type: 'string' } },
+          required: ['code', 'description'],
+          additionalProperties: false
+        }
+      }
+    ];
+    const before = requests.length;
+    try {
+      for (const protocol of ['chat', 'responses', 'anthropic'])
+        for (const stream of [false, true]) {
+          const tools = definitions.map((t) =>
+            protocol === 'chat'
+              ? { type: 'function', function: t }
+              : protocol === 'responses'
+                ? { type: 'function', ...t }
+                : { name: t.name, input_schema: t.parameters }
+          );
+          const body = {
+              model: 'demo',
+              stream,
+              tools,
+              ...(protocol === 'responses'
+                ? { input: 'GLOBAL_DSML_PREFIX_RECOVERY' }
+                : {
+                    messages: [{ role: 'user', content: 'GLOBAL_DSML_PREFIX_RECOVERY' }],
+                    ...(protocol === 'anthropic' ? { max_tokens: 1000 } : {})
+                  })
+            },
+            route =
+              'http://proxy/v1/' +
+              { chat: 'chat/completions', responses: 'responses', anthropic: 'messages' }[protocol];
+          const response = await runtime.fetch(route, { method: 'POST', body: JSON.stringify(body) });
+          assert.equal(response.status, 200);
+          const events = stream ? await Array.fromAsync(sseEvents(response.body)) : undefined,
+            result = stream ? undefined : await response.json();
+          assert.ok(!JSON.stringify(events ?? result).includes('DSML'));
+          let calls, text, next;
+          if (protocol === 'chat') {
+            const message = stream
+              ? {
+                  role: 'assistant',
+                  content: events.map((e) => e.choices?.[0]?.delta.content ?? '').join(''),
+                  tool_calls: toolCalls(events).map(({ index, ...c }) => c)
+                }
+              : result.choices[0].message;
+            text = message.content;
+            calls = message.tool_calls;
+            assert.equal(
+              stream
+                ? events.find((e) => e.choices?.[0]?.finish_reason)?.choices[0].finish_reason
+                : result.choices[0].finish_reason,
+              'tool_calls'
+            );
+            next = {
+              ...body,
+              stream: false,
+              messages: [
+                ...body.messages,
+                message,
+                ...calls
+                  .toReversed()
+                  .map((c) => ({ role: 'tool', tool_call_id: c.id, content: 'done ' + c.function.name }))
+              ]
+            };
+            calls = calls.map((c) => ({ name: c.function.name, input: JSON.parse(c.function.arguments) }));
+          } else if (protocol === 'responses') {
+            const final = stream ? events.at(-1).response : result;
+            text = final.output
+              .flatMap((i) => i.content ?? [])
+              .map((p) => p.text ?? '')
+              .join('');
+            calls = final.output.filter((i) => i.type === 'function_call');
+            assert.equal(final.status, 'completed');
+            next = {
+              ...body,
+              stream: false,
+              input: [
+                { role: 'user', content: body.input },
+                ...final.output,
+                ...calls
+                  .toReversed()
+                  .map((c) => ({ type: 'function_call_output', call_id: c.call_id, output: 'done ' + c.name }))
+              ]
+            };
+            calls = calls.map((c) => ({ name: c.name, input: JSON.parse(c.arguments) }));
+          } else {
+            const content = stream
+              ? events
+                  .filter((e) => e.type === 'content_block_start')
+                  .map((e) => {
+                    const b = { ...e.content_block },
+                      d = events.filter((d) => d.index === e.index && d.type === 'content_block_delta');
+                    if (b.type === 'text') b.text = d.map((d) => d.delta.text ?? '').join('');
+                    if (b.type === 'tool_use') b.input = JSON.parse(d.map((d) => d.delta.partial_json ?? '').join(''));
+                    return b;
+                  })
+              : result.content;
+            text = content
+              .filter((b) => b.type === 'text')
+              .map((b) => b.text)
+              .join('');
+            calls = content.filter((b) => b.type === 'tool_use');
+            assert.equal(
+              stream ? events.find((e) => e.type === 'message_delta').delta.stop_reason : result.stop_reason,
+              'tool_use'
+            );
+            next = {
+              ...body,
+              stream: false,
+              messages: [
+                ...body.messages,
+                { role: 'assistant', content },
+                {
+                  role: 'user',
+                  content: calls
+                    .toReversed()
+                    .map((c) => ({ type: 'tool_result', tool_use_id: c.id, content: 'done ' + c.name }))
+                }
+              ]
+            };
+          }
+          assert.equal(text, dsmlPreface);
+          assert.deepEqual(
+            calls.map((c) => c.name),
+            ['pwsh', 'run_code']
+          );
+          assert.equal(calls[0].input.command, dsmlShellCommand);
+          assert.equal(calls[1].input.code, dsmlCode);
+          const final = await runtime.fetch(route, { method: 'POST', body: JSON.stringify(next) });
+          assert.equal(final.status, 200);
+          assert.match(JSON.stringify(await final.json()), /全局 OpenCode/);
+          const sent = requests.at(-1).body.messages;
+          assert.equal(sent.filter((m) => m.role === 'tool').length, 2);
+          assert.deepEqual(
+            sent.filter((m) => m.role === 'tool').map((m) => m.content),
+            ['done pwsh', 'done run_code']
+          );
+          assert.equal(
+            JSON.parse(sent.find((m) => m.tool_calls?.length).tool_calls[0].function.arguments).command,
+            dsmlShellCommand
+          );
+        }
+    } finally {
+      await runtime.close();
+    }
+    assert.equal(requests.length, before + 12, 'No local tool execution or hidden OpenCode continuation inference');
+  }
+);
 
 test('hotpath: automatic runtime warmup never infers and keeps both selected models ready', {timeout:90000}, async()=>{
  const runtime=new ProxyRuntime({file:path.join(home,'hot-runtime.json'),settings:{...options,onFailure:undefined,workerReuse:true,discoverModels:false,workerIdleMs:100,host:'127.0.0.1',port:0,models:{a:{model:'fixture-api/mock',context:100000,output:1000},b:{model:'fixture-api/native-variants',context:100000,output:1000},c:{model:'fixture-api/text-only',context:100000,output:1000}},modelOverrides:{},apiKeys:[]}}),reports=[];runtime.current.bridge.config.onDiagnostics=r=>reports.push(r);
