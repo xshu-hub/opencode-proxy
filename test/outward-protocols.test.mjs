@@ -88,7 +88,8 @@ test('Anthropic accepts current function-tool streaming preferences without weak
  }
  for(const patch of [{eager_input_streaming:'yes'},{type:'bash_20250124'},{strict:'yes'},{unrecognized:true}])assert.throws(()=>validateRequest(toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],tools:[{name:'weather',input_schema:{type:'object'},...patch}]}),{demo:{output:1000}}),e=>e.status===400);
  for(const top_k of [-1,1.5,'20'])assert.throws(()=>validateRequest(toChatRequest('anthropic',{model:'demo',max_tokens:100,top_k,messages:[{role:'user',content:'hi'}]}),{demo:{output:1000}}),e=>e.status===400&&e.param==='top_k');
- assert.throws(()=>toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],thinking:{type:'adaptive',display:'summarized'}}),e=>e.status===400&&e.param==='thinking.display');
+ assert.deepEqual(toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],thinking:{type:'adaptive',display:'summarized'}}).thinking,{type:'enabled'});
+ assert.throws(()=>toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'user',content:'hi'}],thinking:{type:'adaptive',display:'invalid'}}),e=>e.status===400&&e.param==='thinking.display');
 });
 test('Chat accepts harmless standard hints and still rejects unsupported guarantees',()=>{
  const request={model:'demo',messages:[{role:'user',content:'hello'}],stream:true},client={...request,user:'client-user',metadata:{client:'sdk'},store:false,stop:[],response_format:{type:'text'},parallel_tool_calls:true},snapshot=structuredClone(client);
@@ -115,9 +116,35 @@ test('Responses streaming emits sequenced events, complete items, Unicode and us
  assert.deepEqual(events.map(e=>e.sequence_number),events.map((_,i)=>i));assert.equal(events[0].type,'response.created');assert.equal(events.at(-1).type,'response.completed');
  const final=events.at(-1).response;assert.equal(final.output.find(i=>i.type==='function_call').arguments,'{"city":"北京"}');assert.equal(final.output.find(i=>i.type==='message').content[0].text,'你好');assert.equal(final.usage.input_tokens,22);assert.equal(final.usage.output_tokens_details.reasoning_tokens,2);assert.equal(final.store,false);
 });
-test('Anthropic streaming completes blocks and separates cached input without fake signatures',async()=>{
+test('Anthropic streaming exposes unsigned thinking and separates cached input without fake signatures',async()=>{
  const response=await adaptResponse('anthropic',source([choice({reasoning_content:'private'}),choice({content:'你好'}),choice({tool_calls:[{index:0,id:'a',function:{name:'weather',arguments:'{"city":"北京"}'}}]}),choice({},'tool_calls'),{choices:[],usage}],1),{model:'demo',stream:true});const events=[];for await(const e of sseEvents(response.body))events.push(e);
- assert.equal(events[0].type,'message_start');assert.equal(events.at(-1).type,'message_stop');assert.equal(events.filter(e=>e.type==='content_block_start').length,events.filter(e=>e.type==='content_block_stop').length);assert.ok(!JSON.stringify(events).includes('private'));const last=events.find(e=>e.type==='message_delta');assert.equal(last.delta.stop_reason,'tool_use');assert.deepEqual(last.usage,{input_tokens:10,cache_read_input_tokens:7,cache_creation_input_tokens:5,output_tokens:12});assert.equal(observation('anthropic',last).usage.prompt_tokens,22);
+ assert.equal(events[0].type,'message_start');assert.equal(events.at(-1).type,'message_stop');assert.equal(events.filter(e=>e.type==='content_block_start').length,events.filter(e=>e.type==='content_block_stop').length);assert.equal(events.find(e=>e.type==='content_block_start').content_block.signature,'');assert.equal(events.filter(e=>e.delta?.type==='thinking_delta').map(e=>e.delta.thinking).join(''),'private');const last=events.find(e=>e.type==='message_delta');assert.equal(last.delta.stop_reason,'tool_use');assert.deepEqual(last.usage,{input_tokens:10,cache_read_input_tokens:7,cache_creation_input_tokens:5,output_tokens:12});assert.equal(observation('anthropic',last).usage.prompt_tokens,22);
+});
+
+test('Anthropic unsigned thinking replays as native reasoning with client tools, including empty blocks',()=>{
+ for(const signature of [undefined,'']){
+  const body={model:'demo',max_tokens:100,thinking:{type:'adaptive'},messages:[{role:'user',content:'question'},{role:'assistant',content:[{type:'thinking',thinking:'first\n',...(signature!==undefined?{signature}:{})},{type:'thinking',thinking:'second'},{type:'tool_use',id:'call',name:'weather',input:{city:'北京'}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'call',content:'sunny'}]}]},snapshot=structuredClone(body);
+  const chat=toChatRequest('anthropic',body);validateRequest(chat,{demo:{output:1000}});assert.equal(chat.messages[1].reasoning_content,'first\nsecond');assert.equal(chat.messages[1].content,null);assert.equal(chat.messages[2].tool_call_id,'call');assert.deepEqual(chat.thinking,{type:'enabled'});assert.deepEqual(body,snapshot);
+ }
+ for(const thinking of [{type:'thinking',thinking:'history',signature:'native-provider-signature'},{type:'thinking',thinking:'history',signature:null},{type:'thinking',thinking:7},{type:'redacted_thinking',data:'opaque'}])assert.throws(()=>toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'assistant',content:[thinking]},{role:'user',content:'next'}]}),e=>e.status===400);
+ const empty=toChatRequest('anthropic',{model:'demo',max_tokens:100,messages:[{role:'assistant',content:[{type:'thinking',thinking:'',signature:''}]},{role:'user',content:'next'}]});assert.equal(empty.messages[0].reasoning_content,'');
+});
+
+for(const stream of [false,true])test(`Anthropic thinking display honors omitted/disabled and preserves reasoning-only responses (stream=${stream})`,async()=>{
+ for(const thinking of [undefined,{type:'enabled'},{type:'adaptive',display:'summarized'},{type:'enabled',display:'omitted'},{type:'disabled'}]){
+  const hidden=thinking?.display==='omitted'||thinking?.type==='disabled';
+  const raw=stream?source([choice({reasoning_content:'分步思考🙂'}),choice({},'stop'),{choices:[],usage}],1):Response.json({choices:[{message:{role:'assistant',content:null,reasoning_content:'分步思考🙂'},finish_reason:'stop'}],usage});
+  const response=await adaptResponse('anthropic',raw,{model:'demo',stream,thinking});
+  if(stream){const events=await Array.fromAsync(sseEvents(response.body));assert.equal(events.filter(e=>e.delta?.type==='thinking_delta').map(e=>e.delta.thinking).join(''),hidden?'':'分步思考🙂');assert.equal(events.at(-1).type,'message_stop');assert.equal(events.filter(e=>e.type==='content_block_start').length,events.filter(e=>e.type==='content_block_stop').length);}
+  else{const result=await response.json();assert.deepEqual(result.content,hidden?[]:[{type:'thinking',thinking:'分步思考🙂',signature:''}]);assert.equal(result.stop_reason,'end_turn');assert.equal(result.usage.output_tokens,12);}
+ }
+});
+
+test('Anthropic thinking transitions close the correct blocks before text and tools',async()=>{
+ const chunks=[choice({reasoning_content:'one'}),choice({reasoning_content:' two'}),choice({content:'answer'}),choice({reasoning_content:'three'}),choice({tool_calls:[{index:0,id:'call',function:{name:'weather',arguments:'{}'}}]}),choice({},'tool_calls'),{choices:[],usage}];
+ const reply=await adaptResponse('anthropic',source(chunks,1),{model:'demo',stream:true}),events=await Array.fromAsync(sseEvents(reply.body)),open=new Set(),blocks=[];
+ for(const e of events){if(e.type==='content_block_start'){assert.equal(open.size,0);open.add(e.index);blocks.push(e.content_block);}if(e.type==='content_block_delta')assert.ok(open.has(e.index));if(e.type==='content_block_stop')assert.ok(open.delete(e.index));}
+ assert.equal(open.size,0);assert.deepEqual(blocks.map(b=>b.type),['thinking','text','thinking','tool_use']);assert.equal(events.filter(e=>e.delta?.type==='thinking_delta').map(e=>e.delta.thinking).join(''),'one twothree');assert.ok(!events.some(e=>e.delta?.type==='signature_delta'));
 });
 test('Nonstream outputs preserve length, tool inputs and protocol errors',async()=>{
  const data={choices:[{message:{content:'hello',tool_calls:[{id:'a',function:{name:'weather',arguments:'{"city":"北京"}'}}]},finish_reason:'length'}],usage};

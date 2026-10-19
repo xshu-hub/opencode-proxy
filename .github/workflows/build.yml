@@ -58,8 +58,8 @@ jobs:
         run: |
           npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35 @opencode-ai/plugin@1.18.35
           node -e 'const fs=require("fs"),path=require("path");const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json"));const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode);fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\nTEST_PACKAGED_PROXY="+path.resolve("dist",process.platform==="win32"?"windows/opencode-proxy-server.exe":"linux/opencode-proxy-server")+"\n")'
-      - name: Verify packaged server through real OpenCode
-        run: node --test --test-name-pattern='managed20:' test/global.test.mjs
+      - name: Verify packaged server and hot worker lifecycle through real OpenCode
+        run: node --test --test-name-pattern='managed20:|hotpath:' test/global.test.mjs
       - name: Archive standalone application
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then

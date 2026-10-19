@@ -10,6 +10,19 @@ import {toChatRequest} from '../lib/outward-protocols.mjs';
 import {nativeGeneration} from '../lib/generation.mjs';
 import {assertSchema,compileSchema} from '../lib/schema.mjs';
 import {StartupGate} from '../lib/startup-gate.mjs';
+
+test('live regression reader captures Anthropic thinking deltas and can interrupt during reasoning',async()=>{
+ const {mkdtemp,rmdir}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),path=await import('node:path');
+ const dir=await mkdtemp(path.join(tmpdir(),'opencode-thinking-reader-')),keys=['OPENCODE_PROXY_LIVE_URL','OPENCODE_PROXY_LIVE_KEY','OPENCODE_PROXY_LIVE_REPORT_DIR'],saved=Object.fromEntries(keys.map(k=>[k,process.env[k]])),originalFetch=globalThis.fetch;
+ try{
+  process.env.OPENCODE_PROXY_LIVE_URL='http://fixture/v1';process.env.OPENCODE_PROXY_LIVE_KEY='fixture-key';process.env.OPENCODE_PROXY_LIVE_REPORT_DIR=dir;
+  const {request}=await import('../scripts/live-client.mjs?thinking-reader');
+  const events=[{type:'message_start',message:{usage:{input_tokens:2,output_tokens:0}}},{type:'content_block_start',index:0,content_block:{type:'thinking',thinking:'',signature:''}},{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'真实思考🙂'}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:3}},{type:'message_stop'}];
+  globalThis.fetch=async()=>new Response(events.map(e=>'event: '+e.type+'\ndata: '+JSON.stringify(e)+'\n\n').join(''),{headers:{'content-type':'text/event-stream'}});
+  const response=await request('anthropic',{model:'demo',stream:true});assert.equal(response.reasoning,'真实思考🙂');assert.ok(response.firstOutputMs!==null);assert.equal(response.firstTextMs,null);
+  const cancelled=await request('anthropic',{model:'demo',stream:true},{cancel:'reasoning'});assert.equal(cancelled.cancelled,true);assert.equal(cancelled.cancelStage,'reasoning');
+ }finally{globalThis.fetch=originalFetch;for(const k of keys){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k];}await rmdir(dir);}
+});
 test('cold-start pacing is FIFO, cancels queued work and never caps active inference leases',async()=>{
  const gate=new StartupGate(2),first=await gate.acquire(),second=await gate.acquire(),cancel=new AbortController();
  let ready=false;const third=gate.acquire().then(release=>{ready=true;return release;});

@@ -5,6 +5,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
+import {toolCalls} from './tool-deltas.mjs';
 
 const command = process.env.TEST_OPENCODE_COMMAND;
 if (!command) throw new Error('Set TEST_OPENCODE_COMMAND to a JSON executable/argument array for OpenCode.');
@@ -75,7 +76,7 @@ test('parallel client tools stream as one batch and stateless results continue i
   assert.equal(response.status, 200);
   const chunks = await Array.fromAsync(sseEvents(response.body));
   assert.equal(chunks.some(c => c.error), false, JSON.stringify(chunks));
-  const calls = chunks.flatMap(c => c.choices[0]?.delta.tool_calls ?? []);
+  const calls = toolCalls(chunks);
   assert.deepEqual(calls.map(c => c.function.name), ['weather', 'clock']);
   assert.equal(calls[0].function.arguments, '{"city":"北京"}');
   assert.equal(chunks.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
@@ -122,6 +123,7 @@ test('reused isolated workers keep different upstream credentials in separate pr
       assert.equal(response.status, 200, await response.text());
       assert.equal(requests.at(-1).auth, 'Bearer ' + key);
     }
+    await selected.drain();
     assert.deepEqual(reports.map(r => r.workerReused), [false, true, false]);
     assert.equal(selected.pool.workers.size, 2);
   } finally { await selected.close(); }

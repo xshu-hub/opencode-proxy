@@ -1,4 +1,5 @@
 import { test, after } from 'node:test';
+import {toolCalls} from './tool-deltas.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
@@ -9,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { ProxyRuntime } from '../lib/runtime.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
+import {toChatRequest} from '../lib/outward-protocols.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { createProxyServer } from '../lib/http-server.mjs';
 import { spawn } from 'node:child_process';
@@ -22,8 +24,13 @@ const configDir = path.join(home, 'config', 'opencode');
 const authFile = path.join(data, 'auth.json');
 const observationsFile = path.join(home, 'worker-directories.jsonl');
 const workingDirectory = path.join(home, 'workspace 中文 with spaces');
-const observations = async () => (await readFile(observationsFile, 'utf8')).trim().split('\n').map(JSON.parse);
+const observations = async () => {
+  const raw=await readFile(observationsFile,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
+  return raw.trim().split('\n').filter(Boolean).map(JSON.parse);
+};
 const requests = [];
+const advancedTools=[{type:'namespace',name:'crm',tools:[{type:'function',name:'lookup',parameters:{type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false}}]},{type:'custom',name:'run_code',format:{type:'text'}}];
+const advancedNames=toChatRequest('responses',{input:'hello',tools:advancedTools}).tools.map(t=>t.function.name);
 const faultAttempts=new Map();
 const dsmlCode='const g1 = await tools.grep({ pattern: "SessionRetry|Retry\\.policy|retryable\\(", path: "packages/opencode/src", include: "*.ts" })\nconsole.log(g1.matches.map(m=>m.path+":"+m.lineNumber+": "+m.line).join("\\n"))';
 let refreshes = 0;
@@ -46,7 +53,9 @@ const upstream = http.createServer(async (req, res) => {
   requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
   const fault=body.messages.find(m=>typeof m.content==='string'&&m.content.startsWith('GLOBAL_FAULT_'))?.content;
   if(fault){const attempt=(faultAttempts.get(fault)??0)+1;faultAttempts.set(fault,attempt);
-    if((fault.startsWith('GLOBAL_FAULT_RATE_LIMIT')&&attempt<3)||fault.startsWith('GLOBAL_FAULT_PERMANENT_LIMIT')){res.writeHead(429,{'content-type':'application/json','retry-after':'0'});res.end(JSON.stringify({error:{message:'Too Many Requests: fixture rate limit',type:'rate_limit_error'}}));return;}
+    // Leave time for the public native retry event to reach the proxy before
+    // another attempt. A zero-delay fixture races the event transport itself.
+    if((fault.startsWith('GLOBAL_FAULT_RATE_LIMIT')&&attempt<3)||fault.startsWith('GLOBAL_FAULT_PERMANENT_LIMIT')){res.writeHead(429,{'content-type':'application/json','retry-after':'1'});res.end(JSON.stringify({error:{message:'Too Many Requests: fixture rate limit',type:'rate_limit_error'}}));return;}
     if(fault==='GLOBAL_FAULT_NETWORK'&&attempt===1){req.socket.destroy();return;}
     if(fault==='GLOBAL_FAULT_PARTIAL'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: '+JSON.stringify({id:'partial',object:'chat.completion.chunk',created:1,model:'mock',choices:[{index:0,delta:{content:'PARTIAL_BEFORE_DISCONNECT'},finish_reason:null}]})+'\n\n');setTimeout(()=>res.destroy(),200);return;}
   }
@@ -82,7 +91,11 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if(body.messages.some(m=>m.content==='GLOBAL_DSML_RECOVERY')&&!body.messages.some(m=>m.role==='tool')){
+  if(body.messages.some(m=>m.content==='GLOBAL_ADVANCED_TOOLS')){
+    if(body.messages.some(m=>m.role==='tool'))emit({content:'ADVANCED_OK'});
+    else for(const [index,name] of advancedNames.entries())emit({tool_calls:[{index,id:'advanced_'+index,type:'function',function:{name:nativeToolName(name),arguments:JSON.stringify(index===0?{city:'北京'}:{input:'print("北京🙂")\n'})}}]});
+    emit({},body.messages.some(m=>m.role==='tool')?'stop':'tool_calls',{prompt_tokens:10,completion_tokens:20,total_tokens:30});
+  }else if(body.messages.some(m=>m.content==='GLOBAL_DSML_RECOVERY')&&!body.messages.some(m=>m.role==='tool')){
     const tool=body.tools.find(t=>t.function.name===nativeToolName('run_code'));
     const text='<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="'+tool.function.name+'"> <｜｜DSML｜｜ parameter name="code" string="true">'+dsmlCode+'</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name="description" string="true">Find retry policy usage sites</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>';
     for(let i=0;i<text.length;i+=17){emit({content:text.slice(i,i+17)});await delay(2);}
@@ -105,6 +118,11 @@ const upstream = http.createServer(async (req, res) => {
   } else if (body.messages.some(m => m.role === 'user' && ['AUDIT_FILTER', 'AUDIT_FILTER_TEXT'].includes(m.content))) {
     if (body.messages.some(m => m.content === 'AUDIT_FILTER_TEXT')) emit({ content: 'Before filtering.' });
     emit({},'content_filter',{prompt_tokens:10,completion_tokens:0,total_tokens:10});
+  } else if (body.messages.some(m => m.role === 'user' && m.content === 'GLOBAL_THINKING_CLIENT')) {
+    emit({reasoning_content:'原生思考🙂\n'});await delay(20);emit({reasoning_content:'检查工具结果。'});
+    if(!body.messages.some(m=>m.role==='tool'))emit({tool_calls:[{index:0,id:'thinking_call',type:'function',function:{name:nativeToolName('weather'),arguments:'{"city":"北京"}'}}]});
+    else emit({content:'收到工具结果。'});
+    emit({},body.messages.some(m=>m.role==='tool')?'stop':'tool_calls',{prompt_tokens:100,completion_tokens:30,total_tokens:130,completion_tokens_details:{reasoning_tokens:10}});
   } else if (body.messages.some(m => m.role === 'user' && m.content === 'AUDIT_REASONING')) {
     emit({role:'assistant',reasoning_content:'思考中。'});
     emit({content:'结论。'});
@@ -279,6 +297,7 @@ test('real global v1 loads its configured OAuth plugin, refreshes its own login 
   const worker = (await observations()).at(-1);
   assert.equal(path.basename(worker.cwd), 'workspace');
   assert.match(path.basename(path.dirname(worker.cwd)), /^opencode-proxy-/);
+  await bridge.drain();
   await assert.rejects(() => stat(worker.cwd), { code: 'ENOENT' }, 'Default workspaces are cleaned after inference');
 });
 
@@ -306,6 +325,7 @@ test('standalone HTTP service uses global login and the chosen directory without
   assert.equal(await realpath(inferred.cwd), await realpath(workingDirectory));
   assert.equal(await realpath(inferred.directory), await realpath(workingDirectory));
   assert.notEqual(inferred.db, discovered.db);
+  await proxy.drain();
   await assert.rejects(() => stat(inferred.db), { code: 'ENOENT' });
   assert.equal(await readFile(path.join(workingDirectory, 'keep.txt'), 'utf8'), 'user-owned workspace');
   assert.equal(await readFile(path.join(workingDirectory, 'opencode.json'), 'utf8'), projectConfig);
@@ -324,7 +344,7 @@ test('any provider SDK can return complete tool batches without local execution 
     assert.deepEqual(requests.at(-1).body.tools.map(t => t.function.name).sort(), ['weather', 'clock'].map(nativeToolName).sort(), 'No global built-in or unrelated MCP tool reaches the model');
     for (const name of ['weather', 'clock']) assert.match(requests.at(-1).body.tools.find(t => t.function.name === nativeToolName(name)).function.description, new RegExp('Client function: ' + name));
     const chunks = await Array.fromAsync(bridge.chunks(body, run, { id: 'test', created: 0, model: 'oc-default' }));
-    const calls = chunks.flatMap(c => c.choices[0]?.delta.tool_calls ?? []);
+    const calls = toolCalls(chunks);
     assert.deepEqual(calls.map(c => c.function.name), ['weather', 'clock']);
     assert.equal(chunks.find(c => c.choices[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
     assert.equal(requests.length, before + 1);
@@ -476,6 +496,9 @@ test('default standalone configuration discovers global OpenCode models', {timeo
 });
 
 test('global workers share a configured directory while concurrent inference and cancellation remain isolated', { timeout: 90000 }, async () => {
+  // The full suite already refreshed this disposable OAuth login in its first
+  // test. Establish the same baseline when selecting this test on its own.
+  if(refreshes===0){const warmup=await request({messages:[{role:'user',content:'Concurrent fixture login warmup'}]});assert.equal(warmup.status,200);await warmup.json();}
   const instance = new OpenCodeBridge({ ...options, workerReuse: true, workingDirectory, models: {
     ...options.models,
     'saved-api': { model: 'fixture-api/mock', context: 100000, output: 1000 },
@@ -729,6 +752,7 @@ test('reuse13: exclusive worker reuse resets request hooks and histories without
       assert.ok(response.headers.get('x-opencode-request-id'));
     }
     assert.equal(requests.length, before + 2);
+    await instance.drain();
     assert.equal(reports[0].workerReused, false);
     assert.equal(new Set((await observations()).slice(-2).map(w => w.pid)).size, 1, 'Both completed requests must use the same real process');
     assert.equal(reports[0].workerRetained, true);
@@ -757,10 +781,12 @@ test('reuse13: prewarm never infers and reused workers replace tool schemas, his
     const result = await response.json();
     assert.equal(response.status, 200, JSON.stringify(result));
     assert.deepEqual(result.choices[0].message.tool_calls.map(t => t.function.name), ['weather','clock']);
+    await instance.drain();
     assert.equal(reports.at(-1).workerReused, true);
     const second = await request({ messages: [{role:'user',content:'NO_TOOLS_NEXT'}], tool_choice:'none', tools }, instance);
     assert.equal(second.status, 200, await second.text());
     assert.deepEqual(requests.at(-1).body.tools ?? [], []);
+    await instance.drain();
     assert.equal(reports.at(-1).workerReused, true);
     assert.equal(requests.length, before + 2, 'Tool deferral must not start a hidden continuation');
     assert.equal(instance.pool.workers.size, 1);
@@ -811,11 +837,13 @@ test('reuse13: an idle worker that exited by signal is replaced before inference
   try {
     const first = await request({ messages: [{ role: 'user', content: 'BEFORE_EXIT' }] }, instance);
     assert.equal(first.status, 200, await first.text());
+    await instance.drain();
     const prior = [...instance.pool.workers][0];
     prior.child.kill();
     await prior.worker.done;
     const next = await request({ messages: [{ role: 'user', content: 'AFTER_EXIT' }] }, instance);
     assert.equal(next.status, 200, await next.text());
+    await instance.drain();
     assert.equal(reports.at(-1).workerReused, false);
     assert.notEqual([...instance.pool.workers][0].child.pid, prior.child.pid);
     assert.equal(requests.length, before + 2);
@@ -944,6 +972,35 @@ test('inline image parts cross all protocol adapters and the real OpenCode SDK w
  }}finally{await runtime.close();}
 });
 
+test('advanced Responses identities and parallel image tool results survive real OpenCode', {timeout:120000}, async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'advanced-tools.json'),settings:{...options,onFailure:undefined,host:'127.0.0.1',port:0,workerReuse:true,discoverModels:false,modelOverrides:{},models:{vision:{model:'fixture-api/mock',context:100000,output:1000,inputModalities:['text','image']}},apiKeys:[]}});
+ const data='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yS7cAAAAASUVORK5CYII=',url='data:image/png;base64,'+data,route='http://proxy/v1/responses';
+ try{for(const stream of [false,true]){
+  const body={model:'vision',input:'GLOBAL_ADVANCED_TOOLS',tools:advancedTools,stream},response=await runtime.fetch(route,{method:'POST',body:JSON.stringify(body)});assert.equal(response.status,200);
+  const first=stream?(await Array.fromAsync(sseEvents(response.body))).at(-1).response:await response.json();assert.ok(first, 'Missing terminal response');
+  const calls=first.output.filter(i=>['function_call','custom_tool_call'].includes(i.type));assert.equal(calls.length,2);assert.equal(calls[0].namespace,'crm');assert.equal(calls[0].name,'lookup');assert.equal(calls[1].type,'custom_tool_call');assert.equal(calls[1].input,'print("北京🙂")\n');
+  const input=[{role:'user',content:body.input},...first.output,...calls.toReversed().map(c=>({type:c.type==='custom_tool_call'?'custom_tool_call_output':'function_call_output',call_id:c.call_id,output:[{type:'input_text',text:'tool '+c.call_id},{type:'input_image',image_url:url}]}))];
+  const next=await runtime.fetch(route,{method:'POST',body:JSON.stringify({...body,input})});assert.equal(next.status,200);const final=stream?(await Array.fromAsync(sseEvents(next.body))).at(-1).response:await next.json();assert.ok(JSON.stringify(final.output).includes('ADVANCED_OK'));
+  const sent=requests.at(-1).body.messages;assert.equal(sent.filter(m=>m.role==='tool').length,2);const images=sent.flatMap(m=>Array.isArray(m.content)?m.content:[]).filter(p=>p.type==='image_url');assert.equal(images.length,2);assert.ok(images.every(i=>i.image_url.url===url));assert.ok(JSON.stringify(sent).includes('call_id: advanced_1'));assert.ok(JSON.stringify(sent).includes('call_id: advanced_0'));
+ }}finally{await runtime.close();}
+});
+
+test('Anthropic unsigned thinking displays and replays through real OpenCode before and after client tools', {timeout:120000}, async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'thinking-display.json'),settings:{...options,onFailure:undefined,workerReuse:true,host:'127.0.0.1',port:0,modelOverrides:{},models:{demo:{model:'fixture-api/thinking-toggle',context:100000,output:4096}},apiKeys:[]}});
+ const tools=[{name:'weather',input_schema:{type:'object',properties:{city:{type:'string'}},required:['city']}}],route='http://proxy/v1/messages';
+ try{for(const stream of [false,true])for(const thinking of [{type:'enabled'},{type:'adaptive',display:'summarized'},{type:'enabled',display:'omitted'}]){
+  const body={model:'demo',max_tokens:4096,stream,thinking,tools,messages:[{role:'user',content:'GLOBAL_THINKING_CLIENT'}]},response=await runtime.fetch(route,{method:'POST',body:JSON.stringify(body)});assert.equal(response.status,200,response.status===200?'':await response.text());
+  let content,stop;
+  if(stream){const events=await Array.fromAsync(sseEvents(response.body));assert.ok(!events.some(e=>e.error),JSON.stringify(events));content=events.filter(e=>e.type==='content_block_start').map(e=>{const b={...e.content_block},d=events.filter(d=>d.type==='content_block_delta'&&d.index===e.index).map(e=>e.delta);if(b.type==='thinking')b.thinking=d.map(d=>d.thinking??'').join('');if(b.type==='tool_use')b.input=JSON.parse(d.map(d=>d.partial_json??'').join(''));return b;});stop=events.find(e=>e.type==='message_delta').delta.stop_reason;}
+  else{const result=await response.json();content=result.content;stop=result.stop_reason;}
+  assert.equal(stop,'tool_use');const thought=content.find(b=>b.type==='thinking');if(thinking.display==='omitted')assert.equal(thought,undefined);else{assert.equal(thought.thinking,'原生思考🙂\n检查工具结果。');assert.equal(thought.signature,'');}
+  assert.equal(requests.at(-1).body.reasoning_effort,'high');
+  const call=content.find(b=>b.type==='tool_use'),next={...body,stream:false,messages:[...body.messages,{role:'assistant',content},{role:'user',content:[{type:'tool_result',tool_use_id:call.id,content:'北京晴'}]}]};
+  const final=await runtime.fetch(route,{method:'POST',body:JSON.stringify(next)}),answer=await final.json();assert.equal(final.status,200,JSON.stringify(answer));assert.equal(answer.content.find(b=>b.type==='text').text,'收到工具结果。');
+  if(thought){const assistant=requests.at(-1).body.messages.find(m=>m.role==='assistant'&&m.tool_calls?.length);assert.equal(assistant.reasoning_content,thought.thinking);}
+ }}finally{await runtime.close();}
+});
+
 test('global DSML leaked text becomes client tools and tool results continue through real OpenCode in all protocols', {timeout:120000}, async()=>{
   const runtime=new ProxyRuntime({file:path.join(home,'dsml-settings.json'),settings:{...options,onFailure:undefined,workerReuse:true,host:'127.0.0.1',port:0,modelOverrides:{},models:{demo:{model:'fixture-api/mock',context:100000,output:1000}},apiKeys:[]}});
   const parameters={type:'object',properties:{code:{type:'string'},description:{type:'string'}},required:['code','description'],additionalProperties:false};
@@ -972,6 +1029,37 @@ test('global DSML leaked text becomes client tools and tool results continue thr
     const reply=await runtime.fetch(route,{method:'POST',body:JSON.stringify(next)}),answer=await reply.json();assert.equal(reply.status,200,JSON.stringify(answer));assert.match(JSON.stringify(answer),/全局 OpenCode/);
     const history=requests.at(-1).body.messages;assert.equal(history.find(m=>m.role==='tool').content,'retry policy found');assert.equal(JSON.parse(history.find(m=>m.tool_calls?.length).tool_calls[0].function.arguments).code,dsmlCode);
   }}finally{await runtime.close();}
+});
+
+test('hotpath: automatic runtime warmup never infers and keeps both selected models ready', {timeout:90000}, async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'hot-runtime.json'),settings:{...options,onFailure:undefined,workerReuse:true,discoverModels:false,workerIdleMs:100,host:'127.0.0.1',port:0,models:{a:{model:'fixture-api/mock',context:100000,output:1000},b:{model:'fixture-api/native-variants',context:100000,output:1000},c:{model:'fixture-api/text-only',context:100000,output:1000}},modelOverrides:{},apiKeys:[]}}),reports=[];runtime.current.bridge.config.onDiagnostics=r=>reports.push(r);
+ const before=requests.length;
+ try{
+  await runtime.startGateway();await runtime.warmup;await runtime.current.bridge.drain();assert.equal(requests.length,before,'No supplier inference during readiness');assert.equal(runtime.current.bridge.pool.idle.length,2);assert.equal(runtime.current.bridge.active,0);
+  await delay(250);assert.equal(runtime.current.bridge.pool.idle.length,2,'Selected hot models do not expire with ordinary idle leases');const warmPids=runtime.current.bridge.pool.idle.map(w=>w.child.pid).sort();
+  for(const model of ['a','b']){const r=await runtime.fetch('http://proxy/v1/chat/completions',{method:'POST',body:JSON.stringify({model,messages:[{role:'user',content:'HOT_'+model}],stream:true})});assert.equal(r.status,200);await r.text();}
+  await runtime.current.bridge.drain();assert.equal(requests.length,before+2);assert.ok(reports.filter(r=>r.status==='completed').every(r=>r.workerReused));assert.equal(runtime.current.bridge.pool.idle.length,2);assert.equal(new Set(runtime.current.bridge.pool.idle.map(w=>w.key)).size,2);assert.deepEqual(runtime.current.bridge.pool.idle.map(w=>w.child.pid).sort(),warmPids,'Sequential requests reuse the hot processes without launching disposable spares');
+  for(let i=0;i<2;i++){const r=await runtime.fetch('http://proxy/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'c',messages:[{role:'user',content:'ROTATED_HOT_'+i}],stream:true})});assert.equal(r.status,200);await r.text();await runtime.current.bridge.drain();}
+  assert.equal(requests.length,before+4);assert.deepEqual(reports.filter(r=>r.status==='completed').slice(-2).map(r=>r.workerReused),[false,true]);assert.equal(runtime.current.bridge.pool.idle.length,2);assert.equal(runtime.current.bridge.warmTargets[0],'c');assert.ok(runtime.current.bridge.pool.idle.some(w=>w.key===runtime.current.bridge.workerKey(runtime.current.bridge.acceptedModels.c)),'A new model replaces an old hot target and can be reused');
+  await runtime.stopGateway();assert.equal(runtime.current.bridge.pool.protectedKeys.size,0);assert.equal(runtime.current.bridge.warmTargets.length,0);
+ }finally{await runtime.close();}assert.equal(runtime.current.bridge.pool.workers.size,0);
+});
+
+test('hotpath: protocol terminal events do not wait for reset and next requests never reuse a dirty lease', {timeout:90000}, async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'hot-cleanup.json'),settings:{...options,onFailure:undefined,workerReuse:true,discoverModels:false,host:'127.0.0.1',port:0,models:{a:{model:'fixture-api/mock',context:100000,output:1000}},modelOverrides:{},apiKeys:[]}}),originalFetch=globalThis.fetch;
+ let held;
+ try{
+  await runtime.startGateway();await runtime.warmup;await runtime.current.bridge.drain();runtime.current.bridge.pauseWarmup();
+  for(const protocol of ['chat','responses','anthropic']){
+   const entered=Promise.withResolvers(),release=Promise.withResolvers();held=release;let armed=true;
+   globalThis.fetch=async(url,init)=>{const result=await originalFetch(url,init);if(armed&&String(url).endsWith('/global/dispose')){armed=false;entered.resolve();await release.promise;}return result;};
+   const before=requests.length,route='http://proxy/v1/'+({chat:'chat/completions',responses:'responses',anthropic:'messages'}[protocol]);
+   const send=marker=>runtime.fetch(route,{method:'POST',body:JSON.stringify({model:'a',stream:true,...(protocol==='responses'?{input:marker}:{messages:[{role:'user',content:marker}],...(protocol==='anthropic'?{max_tokens:100}:{})})})});
+   const first=await send('CLEAN_FIRST_'+protocol);assert.equal(first.status,200);const text=await Promise.race([first.text(),delay(3000).then(()=>{throw new Error('Terminal waited for resource cleanup');})]);assert.ok(text.includes(protocol==='chat'?'[DONE]':protocol==='responses'?'response.completed':'message_stop'));
+   await Promise.race([entered.promise,delay(1000).then(()=>{throw new Error('Reset did not begin');})]);assert.equal(runtime.current.bridge.pool.idle.length,0);assert.equal(runtime.current.bridge.active,0);
+   let accepted=false;const next=send('CLEAN_NEXT_'+protocol).then(r=>{accepted=true;return r;});await delay(60);assert.equal(accepted,false);assert.equal(requests.length,before+1,'A resetting process is not available for inference');release.resolve();const response=await next;assert.equal(response.status,200);assert.equal(response.headers.get('x-opencode-worker-reused'),'true');await response.text();await runtime.current.bridge.drain();assert.equal(requests.length,before+2);assert.equal(requests.at(-1).body.messages.filter(m=>m.role==='user').at(-1).content,'CLEAN_NEXT_'+protocol);globalThis.fetch=originalFetch;
+  }
+ }finally{held?.resolve();globalThis.fetch=originalFetch;await runtime.close();}
 });
 
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{
@@ -1003,6 +1091,7 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     assert.equal(requests.at(-1).body.temperature,0.4);assert.equal(requests.at(-1).auth,'Bearer fixture-saved-api-key');
     assert.equal(await readFile(path.join(home,'statistics.json'),'utf8').catch(()=>null),null);
     assert.equal((await admin('/admin/request/removed')).status,404);
+    const thoughtReply=await fetch(state.endpoint+'/messages',{method:'POST',headers:{'x-api-key':'fixture-client-access-key','content-type':'application/json'},body:JSON.stringify({model:'desktop-model',max_tokens:100,stream:true,messages:[{role:'user',content:'AUDIT_REASONING'}]})});assert.equal(thoughtReply.status,200);const thoughtEvents=await Array.fromAsync(sseEvents(thoughtReply.body));assert.equal(thoughtEvents.filter(e=>e.delta?.type==='thinking_delta').map(e=>e.delta.thinking).join(''),'思考中。');assert.equal(thoughtEvents.find(e=>e.type==='content_block_start'&&e.content_block.type==='thinking').content_block.signature,'');
     const dsmlTools=[{name:'run_code',input_schema:{type:'object',properties:{code:{type:'string'},description:{type:'string'}},required:['code','description'],additionalProperties:false}}];
     const dsml=await fetch(state.endpoint+'/messages',{method:'POST',headers:{'x-api-key':'fixture-client-access-key','anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify({model:'desktop-model',max_tokens:100,stream:true,tools:dsmlTools,messages:[{role:'user',content:'GLOBAL_DSML_RECOVERY'}]})});
     assert.equal(dsml.status,200);const dsmlEvents=await Array.fromAsync(sseEvents(dsml.body));assert.ok(!JSON.stringify(dsmlEvents).includes('DSML'));assert.equal(dsmlEvents.find(e=>e.type==='message_delta').delta.stop_reason,'tool_use');const dsmlCall=dsmlEvents.find(e=>e.type==='content_block_start'&&e.content_block.type==='tool_use');assert.equal(dsmlCall.content_block.name,'run_code');assert.equal(JSON.parse(dsmlEvents.filter(e=>e.index===dsmlCall.index&&e.delta?.type==='input_json_delta').map(e=>e.delta.partial_json).join('')).code,dsmlCode);
@@ -1024,6 +1113,11 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
       const next=await fetch(state.endpoint+route,{method:'POST',headers,body:JSON.stringify(continuation)});assert.equal(next.status,200);const answer=await next.json();assert.match(JSON.stringify(answer),/全局 OpenCode/);assert.equal(requests.at(-1).body.messages.filter(m=>m.role==='tool').length,2);assert.ok(requests.at(-1).body.messages.some(m=>m.role==='system'&&m.content.includes('PROTOCOL_SYSTEM_SENTINEL')));
     }
     const preference=await admin('/admin/model','POST',{target:'fixture-api/native-variants',patch:{defaults:{reasoning_effort:'high'}}});assert.equal(preference.status,200);
+    const advanced=await fetch(state.endpoint+'/responses',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify({model:'desktop-model',input:'GLOBAL_ADVANCED_TOOLS',tools:advancedTools,stream:true})});assert.equal(advanced.status,200);
+    const advancedEvents=await Array.fromAsync(sseEvents(advanced.body)),advancedOutput=advancedEvents.at(-1).response.output;assert.equal(advancedEvents.at(-1).type,'response.completed');assert.equal(advancedOutput[0].namespace,'crm');assert.equal(advancedOutput[0].name,'lookup');assert.equal(advancedOutput[1].type,'custom_tool_call');assert.equal(advancedOutput[1].input,'print("北京🙂")\n');
+    const advancedImage='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yS7cAAAAASUVORK5CYII=';
+    const advancedInput=[{role:'user',content:'GLOBAL_ADVANCED_TOOLS'},...advancedOutput,...advancedOutput.toReversed().map(c=>({type:c.type==='custom_tool_call'?'custom_tool_call_output':'function_call_output',call_id:c.call_id,output:[{type:'input_image',image_url:advancedImage}]}))];
+    const advancedNext=await fetch(state.endpoint+'/responses',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify({model:'desktop-model',input:advancedInput,tools:advancedTools})});assert.equal(advancedNext.status,200);assert.match(JSON.stringify(await advancedNext.json()),/ADVANCED_OK/);assert.equal(requests.at(-1).body.messages.flatMap(m=>Array.isArray(m.content)?m.content:[]).filter(p=>p.type==='image_url'&&p.image_url.url===advancedImage).length,2);
     const sendEffort=async effort=>{const body={model:'native-variants',messages:[{role:'user',content:'Hello'}],...(effort?{reasoning_effort:effort}:{})};const reply=await fetch(state.endpoint+'/chat/completions',{method:'POST',headers:{authorization:'Bearer fixture-client-access-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(reply.status,200,await(reply.status===200?Promise.resolve(''):reply.text()));await reply.text();};
     await sendEffort();assert.equal(requests.at(-1).body.reasoning_effort,'high');assert.deepEqual(requests.at(-1).body.fixture_nested,{keep:'base',choose:'native-high'});await sendEffort('low');assert.equal(requests.at(-1).body.reasoning_effort,'low');
     const customMapping={high:{reasoningEffort:'max',fixture_nested:{choose:'custom-high'}}};
