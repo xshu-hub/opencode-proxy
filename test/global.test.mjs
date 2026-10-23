@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { ProxyRuntime } from '../lib/runtime.mjs';
 import { nativeToolName, sseEvents } from '../lib/protocol.mjs';
-import {toChatRequest} from '../lib/outward-protocols.mjs';
+import {toChatRequest,adaptResponse} from '../lib/outward-protocols.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { createProxyServer } from '../lib/http-server.mjs';
 import { spawn } from 'node:child_process';
@@ -55,6 +55,12 @@ const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
+  const channelFault=body.messages.find(m=>m.role==='user'&&typeof m.content==='string'&&m.content.startsWith('CHANNEL_FAULT_'))?.content;
+  if(req.headers.authorization==='Bearer fixture-channel-a'&&channelFault){
+    const status=channelFault==='CHANNEL_FAULT_AUTH'?401:429;
+    res.writeHead(status,{'content-type':'application/json','retry-after':'1'});
+    res.end(JSON.stringify({error:{message:status===401?'Invalid API key':'Too Many Requests',type:status===401?'authentication_error':'rate_limit_error'}}));return;
+  }
   const fault=body.messages.find(m=>typeof m.content==='string'&&m.content.startsWith('GLOBAL_FAULT_'))?.content;
   if(fault){const attempt=(faultAttempts.get(fault)??0)+1;faultAttempts.set(fault,attempt);
     // Leave time for the public native retry event to reach the proxy before
@@ -1339,3 +1345,389 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal('statistics' in restarted,false);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'max');assert.deepEqual(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningPreset,selectedPreset);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningVariants,undefined);assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
   }finally{await stop();}
 });
+
+test(
+  'channels: real OpenCode rotates isolated credentials, sticks all protocol/tool histories and preserves global auth',
+  { timeout: 240000 },
+  async () => {
+    const channels = [
+      {
+        id: 'pool',
+        name: 'Fixture channel',
+        protocol: 'openai-chat',
+        baseURL: baseURL + '/v1',
+        stickyTtlMs: 1000,
+        cooldownMs: 1000,
+        maxKeyAttempts: 2,
+        keys: [
+          { id: 'a', name: 'a', key: 'fixture-channel-a', enabled: true },
+          { id: 'b', name: 'b', key: 'fixture-channel-b', enabled: true }
+        ],
+        models: [{ alias: 'pooled', id: 'mock', context: 100000, output: 1000 }]
+      }
+    ];
+    const authBefore = await readFile(authFile, 'utf8'),
+      configBefore = await readFile(path.join(configDir, 'opencode.json'), 'utf8');
+    const runtime = new ProxyRuntime({
+      file: path.join(home, 'channel-settings.json'),
+      settings: {
+        ...options,
+        onFailure: undefined,
+        workerReuse: true,
+        discoverModels: false,
+        host: '127.0.0.1',
+        port: 0,
+        models: { global: { model: 'fixture-api/mock', context: 100000, output: 1000 } },
+        channels,
+        modelOverrides: {},
+        apiKeys: []
+      }
+    });
+    let now = 0;
+    runtime.channelPool.now = () => now;
+    const client = { id: 'channel-client' };
+    const send = (protocol, body, session) =>
+      runtime.fetch(
+        'http://proxy/v1/' + { chat: 'chat/completions', responses: 'responses', anthropic: 'messages' }[protocol],
+        { method: 'POST', headers: session ? { 'x-opencode-session-id': session } : {}, body: JSON.stringify(body) },
+        undefined,
+        client
+      );
+    function unpack(protocol, result, events) {
+      if (protocol === 'chat') {
+        const message = events
+          ? {
+              role: 'assistant',
+              content: events.map((e) => e.choices?.[0]?.delta.content ?? '').join(''),
+              tool_calls: toolCalls(events).map(({ index, ...call }) => call)
+            }
+          : result.choices[0].message;
+        return {
+          calls: message.tool_calls ?? [],
+          messages: [
+            message,
+            ...(message.tool_calls ?? [])
+              .toReversed()
+              .map((c) => ({ role: 'tool', tool_call_id: c.id, content: 'done ' + c.function.name }))
+          ]
+        };
+      }
+      if (protocol === 'responses') {
+        const final = events ? events.at(-1).response : result,
+          calls = final.output.filter((c) => c.type === 'function_call');
+        return {
+          calls,
+          input: [
+            ...final.output,
+            ...calls
+              .toReversed()
+              .map((c) => ({ type: 'function_call_output', call_id: c.call_id, output: 'done ' + c.name }))
+          ]
+        };
+      }
+      const content = events
+          ? events
+              .filter((e) => e.type === 'content_block_start')
+              .map((e) => {
+                const b = { ...e.content_block },
+                  deltas = events.filter((d) => d.type === 'content_block_delta' && d.index === e.index);
+                if (b.type === 'text') b.text = deltas.map((d) => d.delta.text ?? '').join('');
+                if (b.type === 'tool_use') b.input = JSON.parse(deltas.map((d) => d.delta.partial_json ?? '').join(''));
+                return b;
+              })
+          : result.content,
+        calls = content.filter((c) => c.type === 'tool_use');
+      return {
+        calls,
+        messages: [
+          { role: 'assistant', content },
+          {
+            role: 'user',
+            content: calls
+              .toReversed()
+              .map((c) => ({ type: 'tool_result', tool_use_id: c.id, content: 'done ' + c.name }))
+          }
+        ]
+      };
+    }
+    const definitions = ['weather', 'clock'].map((name) => ({
+      name,
+      parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] }
+    }));
+    try {
+      const catalog = await runtime.models();
+      assert.deepEqual(
+        catalog.map((m) => m.id),
+        ['global', 'pooled']
+      );
+      const response = await send('chat', { model: 'global', messages: [{ role: 'user', content: 'hello' }] });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
+      let index = 0;
+      for (const protocol of ['chat', 'responses', 'anthropic'])
+        for (const stream of [false, true]) {
+          const session = 'tools-' + protocol + '-' + stream,
+            expected = index++ % 2 === 0 ? 'Bearer fixture-channel-a' : 'Bearer fixture-channel-b';
+          const tools = definitions.map((t) =>
+            protocol === 'chat'
+              ? { type: 'function', function: t }
+              : protocol === 'responses'
+                ? { type: 'function', ...t }
+                : { name: t.name, input_schema: t.parameters }
+          );
+          const body = {
+            model: 'pooled',
+            stream,
+            tools,
+            ...(protocol === 'responses'
+              ? { input: 'call tools' }
+              : {
+                  messages: [{ role: 'user', content: 'call tools' }],
+                  ...(protocol === 'anthropic' ? { max_tokens: 1000 } : {})
+                })
+          };
+          const first = await send(protocol, body, session);
+          assert.equal(first.status, 200, await first.clone().text());
+          assert.equal(first.headers.get('x-opencode-session-id'), session);
+          const events = stream ? await Array.fromAsync(sseEvents(first.body)) : undefined,
+            result = stream ? undefined : await first.json();
+          assert.equal(requests.at(-1).auth, expected);
+          const history = unpack(protocol, result, events);
+          assert.equal(history.calls.length, 2);
+          // An unrelated new conversation must not move the existing binding.
+          const unrelated = await send(
+            'chat',
+            { model: 'pooled', messages: [{ role: 'user', content: 'hello' }] },
+            'other-' + index
+          );
+          await unrelated.text();
+          index++;
+          const follow = {
+            ...body,
+            stream: false,
+            ...(protocol === 'responses'
+              ? { input: [{ role: 'user', content: body.input }, ...history.input] }
+              : { messages: [...body.messages, ...history.messages] })
+          };
+          const final = await send(protocol, follow, session);
+          assert.equal(final.status, 200);
+          assert.match(await final.text(), /全局 OpenCode/);
+          assert.equal(requests.at(-1).auth, expected);
+          assert.equal(requests.at(-1).body.messages.filter((m) => m.role === 'tool').length, 2);
+        }
+      // Multiple active requests for one session use the same Key and exclusive native workers.
+      const before = requests.length;
+      const parallel = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          send('chat', { model: 'pooled', messages: [{ role: 'user', content: 'parallel' }] }, 'parallel')
+        )
+      );
+      for (const response of parallel) {
+        assert.equal(response.status, 200);
+        await response.text();
+      }
+      assert.equal(new Set(requests.slice(before).map((r) => r.auth)).size, 1);
+      const original = requests.at(-1).auth;
+      now = 2000;
+      runtime.channelPool.prune();
+      assert.equal(runtime.channelPool.summary(runtime.current.channels.channels)[0].bindings, 0);
+      const expired = await send(
+        'chat',
+        { model: 'pooled', messages: [{ role: 'user', content: 'expired' }] },
+        'parallel'
+      );
+      await expired.text();
+      assert.notEqual(requests.at(-1).auth, original);
+      assert.equal(await readFile(authFile, 'utf8'), authBefore);
+      assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), configBefore);
+    } finally {
+      await runtime.close();
+    }
+  }
+);
+
+test(
+  'channels: real OpenCode auth/rate failures switch keys before output and interruption releases binding',
+  { timeout: 120000 },
+  async () => {
+    const channels = [
+      {
+        id: 'failover',
+        name: 'Failure fixture',
+        protocol: 'openai-chat',
+        baseURL: baseURL + '/v1',
+        cooldownMs: 1000,
+        keys: [
+          { id: 'a', name: 'a', key: 'fixture-channel-a', enabled: true },
+          { id: 'b', name: 'b', key: 'fixture-channel-b', enabled: true }
+        ],
+        models: [{ alias: 'pooled', id: 'mock', context: 100000, output: 1000 }]
+      }
+    ];
+    const runtime = new ProxyRuntime({
+      file: path.join(home, 'channel-failures.json'),
+      settings: {
+        ...options,
+        onFailure: undefined,
+        workerReuse: true,
+        discoverModels: false,
+        host: '127.0.0.1',
+        port: 0,
+        channels,
+        modelOverrides: {},
+        apiKeys: []
+      }
+    });
+    const send = (content, session, signal) =>
+      runtime.fetch(
+        'http://proxy/v1/chat/completions',
+        {
+          method: 'POST',
+          signal,
+          headers: { 'x-opencode-session-id': session },
+          body: JSON.stringify({ model: 'pooled', stream: true, messages: [{ role: 'user', content }] })
+        },
+        undefined,
+        { id: 'client' }
+      );
+    try {
+      for (const [marker, status] of [
+        ['CHANNEL_FAULT_AUTH', 'invalid'],
+        ['CHANNEL_FAULT_RATE', 'cooling']
+      ]) {
+        runtime.channelPool.reset('failover', 'a');
+        runtime.channelPool.channels.get('failover')?.bindings.clear();
+        if (runtime.channelPool.channels.has('failover')) runtime.channelPool.channels.get('failover').cursor = 0;
+        const response = await send(marker, marker);
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.match(JSON.stringify(await Array.fromAsync(sseEvents(response.body))), /全局 OpenCode/);
+        assert.equal(requests.at(-1).auth, 'Bearer fixture-channel-b');
+        assert.equal(runtime.state().channelStatus[0].keys[0].status, status);
+      }
+      pausedStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), finished: false };
+      const controller = new AbortController(),
+        response = await send('HOLD_AFTER_FIRST_OUTPUT', 'cancel', controller.signal);
+      const iterator = sseEvents(response.body);
+      await iterator.next();
+      await pausedStream.started.promise;
+      assert.equal(
+        runtime.state().channelStatus[0].keys.reduce((n, k) => n + k.active, 0),
+        1
+      );
+      controller.abort();
+      pausedStream.release.resolve();
+      await iterator.return();
+      await delay(100);
+      assert.equal(
+        runtime.state().channelStatus[0].keys.reduce((n, k) => n + k.active, 0),
+        0
+      );
+      const restored = await send('hello', 'cancel');
+      assert.equal(restored.status, 200);
+      await restored.text();
+    } finally {
+      pausedStream?.release.resolve();
+      await runtime.close();
+    }
+  }
+);
+
+test(
+  'channels: native OpenCode SDK supports each configured upstream protocol and its credential headers',
+  { timeout: 120000 },
+  async () => {
+    const received = [];
+    const server = http.createServer(async (req, res) => {
+      try {
+        let text = '';
+        for await (const chunk of req) text += chunk;
+        received.push({
+          url: req.url,
+          auth: req.headers.authorization,
+          key: req.headers['x-api-key'],
+          body: JSON.parse(text)
+        });
+        const chunks = [{ role: 'assistant' }, { content: 'NATIVE_CHANNEL_OK' }, {}].map((delta, index) => ({
+          id: 'upstream',
+          model: 'mock',
+          object: 'chat.completion.chunk',
+          created: 1,
+          choices: [{ index: 0, delta, finish_reason: index === 2 ? 'stop' : null }],
+          ...(index === 2 ? { usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } } : {})
+        }));
+        let response = new Response(
+          chunks.map((chunk) => 'data: ' + JSON.stringify(chunk) + '\n\n').join('') + 'data: [DONE]\n\n',
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+        const protocol = req.url.endsWith('/messages')
+          ? 'anthropic'
+          : req.url.endsWith('/responses')
+            ? 'responses'
+            : 'chat';
+        response = await adaptResponse(protocol, response, { model: 'mock', stream: true, input: 'hello' });
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        for await (const chunk of response.body) res.write(chunk);
+        res.end();
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: error.message } }));
+      }
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const channels = ['openai-chat', 'openai-responses', 'anthropic'].map((protocol, index) => ({
+      id: 'sdk' + index,
+      name: protocol,
+      protocol,
+      baseURL: 'http://127.0.0.1:' + server.address().port + '/v1',
+      keys: [
+        { id: 'a', name: 'A', key: 'native-sdk-a', enabled: true },
+        { id: 'b', name: 'B', key: 'native-sdk-b', enabled: true }
+      ],
+      models: [{ alias: 'sdk' + index, id: 'mock', context: 100000, output: 1000 }]
+    }));
+    const runtime = new ProxyRuntime({
+      file: path.join(home, 'channel-upstream-protocols.json'),
+      settings: {
+        ...options,
+        onFailure: undefined,
+        discoverModels: false,
+        workerReuse: true,
+        channels,
+        modelOverrides: {},
+        apiKeys: []
+      }
+    });
+    try {
+      for (const [index, channel] of channels.entries())
+        for (const stream of [false, true]) {
+          const response = await runtime.fetch(
+            'http://proxy/v1/chat/completions',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                model: channel.models[0].alias,
+                stream,
+                messages: [{ role: 'user', content: 'hello' }]
+              })
+            },
+            undefined,
+            { id: 'sdk-client' }
+          );
+          assert.equal(response.status, 200, await response.clone().text());
+          const output = await response.text();
+          assert.match(output, /NATIVE_CHANNEL_OK/);
+          const sent = received.at(-1),
+            key = stream ? 'native-sdk-b' : 'native-sdk-a';
+          assert.equal(index === 2 ? sent.key : sent.auth, index === 2 ? key : 'Bearer ' + key);
+          assert.equal(sent.body.model, 'mock');
+          assert.equal(sent.body.stream, true);
+          assert.equal(sent.url, ['/v1/chat/completions', '/v1/responses', '/v1/messages'][index]);
+        }
+      assert.equal(received.length, 6);
+    } finally {
+      await runtime.close();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+);

@@ -24,6 +24,7 @@ import {
 } from "./ui.js";
 import { openModel } from "./model-form.js";
 import { filteredModels, effortLabels, commandFields } from "./model-data.js";
+import { drawChannels } from "./channels.js";
 
 const pages = {
   models: {
@@ -40,6 +41,11 @@ const pages = {
     title: "OpenCode",
     icon: "terminal",
     subtitle: "选择全局程序与工作目录，复用已有登录和供应商配置。",
+  },
+  channels: {
+    title: "上游渠道",
+    icon: "key",
+    subtitle: "多 Key 轮转、会话绑定和滑动过期。",
   },
   network: {
     title: "网络与超时",
@@ -244,6 +250,11 @@ function draw() {
   if (page === "models") drawModels();
   else if (page === "gateway") drawGateway();
   else if (page === "opencode") drawOpenCode();
+  else if (page === "channels") drawChannels(root, state, async (next, refreshModels) => {
+    bindState(next);
+    if (refreshModels) await readModels();
+    draw();
+  });
   else if (page === "network") drawNetwork();
   else drawGeneral();
 }

@@ -1312,3 +1312,7 @@ body.modal-open {
 .connection-label {
   margin-top: 15px;
 }
+.channel-body { padding: 0 20px 18px; }
+.channel-key { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.channel-key .hint { margin: 0; overflow-wrap: anywhere; }
+.channel-editor-row { padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 10px; }

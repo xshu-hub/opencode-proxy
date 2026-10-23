@@ -11,6 +11,7 @@
 - **模型**：搜索、供应商/状态筛选、分页、单独或批量启停；点击“配置”打开右侧面板，设置纯名称/别名、上下文/输出上限、默认 Temperature / Top P / 输出 Token、默认思考强度和自定义可选档位。测试对话框可选择三种协议。
 - **网关**：启动、停止、重启，选择三种协议查看连接地址与示例；创建、复制、启停、重命名或轮换访问 Key。
 - **OpenCode**：全局程序、启动参数、工作目录，客户端支持文件/目录选择。
+- **上游渠道**：同一渠道配置多个上游 Key，新会话轮询、已有会话固定 Key；配置滑动过期、冷却与有限故障切换。新增渠道使用独立 OpenCode 配置，保留现有全局认证。详见[多 Key 与会话绑定](docs/channels.md)。
 - **网络与超时**：监听地址、端口、并发、超时和空闲工作进程配置。超时按秒填写。
 - **外观与运行**：跟随系统/浅色/深色、文字大小、托盘和退出。
 
@@ -61,6 +62,7 @@ npm run build:ui
 npm test
 npm run test:contracts   # 协议事件、namespace/custom 历史与图片工具结果契约；也包含在 npm test 中
 npm run test:hot-path    # 热池、取消等待、后台清理与 SSE 首包契约；也包含在 npm test 中
+npm run test:channels    # 渠道轮转、粘性会话、滑动过期、管理与三个客户端协议；也包含在 npm test 中
 npm run test:integration # TEST_OPENCODE_COMMAND 指向真实 OpenCode；使用一次性配置和本地模拟供应商
 npm run package:windows  # Go + Bun
 npm run package:linux    # Bun
