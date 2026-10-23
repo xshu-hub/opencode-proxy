@@ -1579,6 +1579,11 @@ test(
         apiKeys: []
       }
     });
+    // Keep scheduler time independent of native startup/inference duration.
+    // On slower runners the real one-second cooldown can expire before the
+    // successful fallback has completed, even though cooldown works correctly.
+    let healthNow = Date.now();
+    runtime.channelPool.now = () => healthNow;
     const send = (content, session, signal) =>
       runtime.fetch(
         'http://proxy/v1/chat/completions',
@@ -1604,6 +1609,12 @@ test(
         assert.match(JSON.stringify(await Array.fromAsync(sseEvents(response.body))), /全局 OpenCode/);
         assert.equal(requests.at(-1).auth, 'Bearer fixture-channel-b');
         assert.equal(runtime.state().channelStatus[0].keys[0].status, status);
+        if (status === 'cooling') {
+          const retryAt = runtime.state().channelStatus[0].keys[0].retryAt;
+          assert.ok(retryAt > healthNow);
+          healthNow = retryAt;
+          assert.equal(runtime.state().channelStatus[0].keys[0].status, 'ready');
+        }
       }
       pausedStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), finished: false };
       const controller = new AbortController(),
