@@ -1,6 +1,7 @@
 node_modules/
 runtime/
 config.json
+*.before-local-only.*.json
 .env
 .env.*
 *.tgz

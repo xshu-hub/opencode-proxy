@@ -4,10 +4,9 @@ All inference is performed by the real global OpenCode process. Client protocols
 are translated to one internal history/tool representation, never directly to a
 supplier HTTP call. The model list, aliases, access keys and configured defaults
 are shared by all three routes.
-Optional [upstream channels](channels.md) add per-channel Key rotation and sticky
-sessions while retaining existing global authentication. All three routes accept
-`x-opencode-session-id` or `metadata.session_id`; the session identifier is used
-only for routing and is not sent as model input.
+Providers and upstream authentication are configured exclusively in local OpenCode.
+The proxy does not configure upstream channels, rotate provider keys or bind them
+to client session IDs. Gateway access keys authenticate clients only.
 These are compatibility subsets, not full implementations of
 every OpenAI or Anthropic feature.
 

@@ -24,7 +24,6 @@ import {
 } from "./ui.js";
 import { openModel } from "./model-form.js";
 import { filteredModels, effortLabels, commandFields } from "./model-data.js";
-import { drawChannels } from "./channels.js";
 
 const pages = {
   models: {
@@ -41,11 +40,6 @@ const pages = {
     title: "OpenCode",
     icon: "terminal",
     subtitle: "选择全局程序与工作目录，复用已有登录和供应商配置。",
-  },
-  channels: {
-    title: "上游渠道",
-    icon: "key",
-    subtitle: "多 Key 轮转、会话绑定和滑动过期。",
   },
   network: {
     title: "网络与超时",
@@ -250,11 +244,6 @@ function draw() {
   if (page === "models") drawModels();
   else if (page === "gateway") drawGateway();
   else if (page === "opencode") drawOpenCode();
-  else if (page === "channels") drawChannels(root, state, async (next, refreshModels) => {
-    bindState(next);
-    if (refreshModels) await readModels();
-    draw();
-  });
   else if (page === "network") drawNetwork();
   else drawGeneral();
 }
@@ -1269,15 +1258,18 @@ function drawNetwork() {
       append(node("div", "card-body"), timing),
     ),
   );
-  const reuse = checkbox("复用健康的空闲 OpenCode 工作进程", s.workerReuse),
+  const sharing = checkbox("低内存并发：共享本机 OpenCode 1 进程", s.workerSharing),
+    reuse = checkbox("复用健康的空闲 OpenCode 工作进程", s.workerReuse),
     maxIdle = input(s.maxIdleWorkers, { type: "number", min: 0, step: 1 }),
     idle = input(s.workerIdleMs / 1000, { type: "number", min: 0, step: 1 });
   form.append(
     card(
       "工作进程",
-      "活动请求独占工作进程，复用不会限制请求并发。",
+      "选择并发隔离方式和空闲保留数量，默认不限制推理并发。",
       append(
         node("div", "card-body"),
+        sharing.element,
+        hint("共享模式为每个请求建立独立实例和会话；同组请求共用进程，进程故障会影响同组请求。默认关闭。"),
         reuse.element,
         append(
           node("div", "form-grid section-title"),
@@ -1304,6 +1296,7 @@ function drawNetwork() {
       port: number(port, "API 端口", 0, 65535),
       maxConcurrent: number(concurrent, "并发上限"),
       workerReuse: reuse.input.checked,
+      workerSharing: sharing.input.checked,
       maxIdleWorkers: number(maxIdle, "空闲进程数"),
       workerIdleMs: number(idle, "空闲回收时间") * 1000,
     };

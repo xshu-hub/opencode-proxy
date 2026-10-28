@@ -24,6 +24,38 @@ test('ready leases win over a slow warmup; one pending worker never serializes a
  }finally{slow.resolve();await pool.close();}
 });
 
+test('completed workers reserve a bounded reset budget without limiting active requests',async()=>{
+ const pool=new WorkerPool({workerReuse:true,maxIdleWorkers:2,workerIdleMs:10000}),disposed=new Set();
+ const workers=Array.from({length:8},()=>worker('a',disposed));
+ try{
+  for(const item of workers)pool.track(item);
+  assert.equal(pool.workers.size,8);
+  assert.deepEqual(workers.map(item=>pool.reserveIdle(item)),[true,true,false,false,false,false,false,false]);
+  assert.equal(pool.reservations.size,2);assert.equal(pool.idle.length,0,'Resetting workers cannot be leased');
+  await Promise.all(workers.slice(2).map(item=>pool.discard(item)));
+  await pool.put(workers[0]);await pool.put(workers[1]);
+  assert.equal(pool.reservations.size,0);assert.equal(pool.idle.length,2);
+  assert.equal(pool.take('a'),workers[0]);
+  assert.equal(pool.reserveIdle(workers[0]),true,'An active lease frees its idle/reset slot');
+  await pool.discard(workers[0]);assert.equal(pool.reservations.size,0,'Failed resets release capacity');
+ }finally{await pool.close();}
+});
+
+test('slow process disposal does not serialize other evictions and shutdown waits for all of them',async()=>{
+ const pool=new WorkerPool({workerReuse:true,maxIdleWorkers:1,workerIdleMs:10000}),gate=Promise.withResolvers(),started=[];
+ const make=key=>({...worker(key,new Set()),dispose:async()=>{started.push(key);await gate.promise;}});
+ const pending=[];
+ try{
+  const a=make('a'),b=make('b'),c=make('c');for(const item of [a,b,c])pool.track(item);
+  await pool.put(a);pending.push(pool.put(b),pool.put(c));await delay(0);
+  assert.deepEqual(started,['a','b']);assert.equal(pool.idle[0],c);
+  assert.equal(pool.workers.size,3,'Exiting processes remain owned until teardown completes');
+  let closed=false;const closing=pool.close().then(()=>{closed=true;});await delay(0);
+  assert.deepEqual(started,['a','b','c']);assert.equal(closed,false);
+  gate.resolve();await closing;assert.equal(pool.workers.size,0);
+ }finally{gate.resolve();await Promise.allSettled(pending);await pool.close();}
+});
+
 test('gateway warmup is asynchronous, selects enabled models and cannot resurrect a closed generation',async()=>{
  const gate=Promise.withResolvers(),calls=[];
  class Bridge{

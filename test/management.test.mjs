@@ -2,9 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import {mkdtemp,readFile,rm,readdir} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,readdir,writeFile} from 'node:fs/promises';
 import http from 'node:http';
-import {validateSettings,withModelDefaults} from '../lib/settings.mjs';
+import {validateSettings,withModelDefaults,readSettings} from '../lib/settings.mjs';
 import {ProxyRuntime} from '../lib/runtime.mjs';
 import {createAdminServer} from '../lib/admin-server.mjs';
 import {sseEvents,validateRequest} from '../lib/protocol.mjs';
@@ -16,12 +16,33 @@ class Bridge{
   async close(){this.closed=true;}
   async fetch(_url,init){const body=JSON.parse(init.body);this.body=body;this.config.onDiagnostics?.({requestId:init.requestId,status:'completed',timings:{catalogMs:0,firstModelEvent:10,completion:1010},usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}},tokens:{input:10,output:6,reasoning:2,cache:{read:5,write:0}}});return Response.json({id:'test',choices:[{message:{content:'fixture answer'},finish_reason:'stop'}],usage:{prompt_tokens:15,completion_tokens:8,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:2}}});}
 }
-async function fixture(run){const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-proxy-admin-'));let runtime,server;try{const settings=validateSettings(config(),directory).settings;runtime=new ProxyRuntime({file:path.join(directory,'config.json'),settings,Bridge});await runtime.initialize();server=createAdminServer({runtime,token:'fixture-admin-key'}).server;await new Promise(r=>server.listen(0,'127.0.0.1',r));await run({runtime,server,directory,base:'http://127.0.0.1:'+server.address().port});}finally{if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}await runtime?.close();await rm(directory,{recursive:true,force:true});}}
+async function fixture(run){const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-proxy-admin-'));let runtime,server;try{const settings=validateSettings(config(),directory).settings;runtime=new ProxyRuntime({file:path.join(directory,'config.json'),settings,Bridge});await runtime.initialize();server=createAdminServer({runtime,token:'fixture-admin-key'}).server;await new Promise(r=>server.listen(0,'127.0.0.1',r));await run({runtime,server,directory,base:'http://127.0.0.1:'+server.address().port});}finally{if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}await runtime?.close();await rm(directory,{recursive:true,force:true,maxRetries:5,retryDelay:100});}}
 test('admin rejects wrong keys, cross-origin posts and DNS-rebinding hosts',async()=>fixture(async({base})=>{
   assert.equal((await fetch(base+'/admin/state')).status,401);
   assert.equal((await fetch(base+'/admin/config',{method:'POST',headers:{authorization:'Bearer fixture-admin-key',origin:'http://foreign.example'},body:'{}'})).status,403);
   const rejected=await new Promise(resolve=>{http.get(base+'/admin/state',{headers:{authorization:'Bearer fixture-admin-key',host:'foreign.example'}},res=>{res.resume();resolve(res.statusCode);});});assert.equal(rejected,403);
   const state=await(await fetch(base+'/admin/state',{headers:{authorization:'Bearer fixture-admin-key'}})).json();assert.equal(state.settings.apiKeys[0].name,'测试客户端');
+}));
+
+test('retired upstream channels are backed up locally before removal and cannot be configured again',async()=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'opencode-retired-config-')),file=path.join(directory,'config.json');
+ try{
+  const original=JSON.stringify({...config(),channels:[{id:'retired',keys:[{key:'retired-fixture-secret'}]}]},null,2);
+  await writeFile(file,original);const settings=await readSettings(file);
+  assert.equal(Object.hasOwn(settings,'channels'),false);assert.equal(settings.apiKeys[0].key,'fixture-access-key');
+  const files=await readdir(directory),backup=files.find(name=>name.startsWith('config.json.before-local-only.'));
+  assert.ok(backup);assert.equal(await readFile(path.join(directory,backup),'utf8'),original);
+  assert.ok(!(await readFile(file,'utf8')).includes('retired-fixture-secret'));
+  await readSettings(file);assert.deepEqual((await readdir(directory)).sort(),files.sort());
+  assert.throws(()=>validateSettings({...settings,channels:[]},directory),/未知配置字段/);
+  assert.equal(settings.workerSharing,false);assert.equal(validateSettings({...settings,workerSharing:true},directory).settings.workerSharing,true);
+ }finally{await rm(directory,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
+});
+
+test('removed channel management endpoint returns 404 without exposing any channel status',async()=>fixture(async({runtime,base})=>{
+ assert.equal(Object.hasOwn(runtime.state(),'channelStatus'),false);
+ const response=await fetch(base+'/admin/channels/reset-key',{method:'POST',headers:{authorization:'Bearer fixture-admin-key','content-type':'application/json'},body:'{}'});
+ assert.equal(response.status,404);
 }));
 test('model aliases/defaults, key changes survive atomic save without killing active generations',async()=>fixture(async({runtime,directory})=>{
   const settings=structuredClone(runtime.settings);settings.modelOverrides={'fixture/mock':{alias:'short-name',defaults:{temperature:0.3,max_tokens:100}}};

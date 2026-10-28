@@ -9,6 +9,7 @@
   "firstOutputTimeoutMs": 120000,
   "idleTimeoutMs": 180000,
   "workerReuse": true,
+  "workerSharing": false,
   "maxIdleWorkers": 2,
   "workerIdleMs": 60000,
   "diagnostics": true

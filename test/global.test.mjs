@@ -14,6 +14,8 @@ import {toChatRequest,adaptResponse} from '../lib/outward-protocols.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
 import { createProxyServer } from '../lib/http-server.mjs';
 import { spawn } from 'node:child_process';
+import { workerStartupGate } from '../lib/startup-gate.mjs';
+import { processMemory } from './process-memory.mjs';
 
 if (!process.env.TEST_OPENCODE_COMMAND) throw new Error('Set TEST_OPENCODE_COMMAND for the real OpenCode global-state test.');
 const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND);
@@ -55,12 +57,6 @@ const upstream = http.createServer(async (req, res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   requests.push({ auth: req.headers.authorization, body, url: req.url, apiKey: req.headers['x-api-key'] });
-  const channelFault=body.messages.find(m=>m.role==='user'&&typeof m.content==='string'&&m.content.startsWith('CHANNEL_FAULT_'))?.content;
-  if(req.headers.authorization==='Bearer fixture-channel-a'&&channelFault){
-    const status=channelFault==='CHANNEL_FAULT_AUTH'?401:429;
-    res.writeHead(status,{'content-type':'application/json','retry-after':'1'});
-    res.end(JSON.stringify({error:{message:status===401?'Invalid API key':'Too Many Requests',type:status===401?'authentication_error':'rate_limit_error'}}));return;
-  }
   const fault=body.messages.find(m=>typeof m.content==='string'&&m.content.startsWith('GLOBAL_FAULT_'))?.content;
   if(fault){const attempt=(faultAttempts.get(fault)??0)+1;faultAttempts.set(fault,attempt);
     // Leave time for the public native retry event to reach the proxy before
@@ -101,7 +97,15 @@ const upstream = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const emit = (delta, reason = null, usage) => res.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'mock', choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}) })}\n\n`);
-  if(body.messages.some(m=>m.content==='GLOBAL_ADVANCED_TOOLS')){
+  const sharedTool=body.messages.find(m=>typeof m.content==='string'&&m.content.startsWith('SHARED_TOOL_'))?.content;
+  if(sharedTool){
+    if(body.messages.some(m=>m.role==='tool'))emit({content:'RESULT_'+sharedTool});
+    else {
+      const key=sharedTool.endsWith('_A')?'onlyA':'onlyB',tool=body.tools.find(t=>t.function.name===nativeToolName('lookup'));
+      emit({tool_calls:[{index:0,id:'call_'+key,type:'function',function:{name:tool.function.name,arguments:JSON.stringify({[key]:key})}}]});
+    }
+    emit({},body.messages.some(m=>m.role==='tool')?'stop':'tool_calls',{prompt_tokens:10,completion_tokens:5,total_tokens:15});
+  }else if(body.messages.some(m=>m.content==='GLOBAL_ADVANCED_TOOLS')){
     if(body.messages.some(m=>m.role==='tool'))emit({content:'ADVANCED_OK'});
     else for(const [index,name] of advancedNames.entries())emit({tool_calls:[{index,id:'advanced_'+index,type:'function',function:{name:nativeToolName(name),arguments:JSON.stringify(index===0?{city:'北京'}:{input:'print("北京🙂")\n'})}}]});
     emit({},body.messages.some(m=>m.role==='tool')?'stop':'tool_calls',{prompt_tokens:10,completion_tokens:20,total_tokens:30});
@@ -1273,6 +1277,242 @@ test('hotpath: protocol terminal events do not wait for reset and next requests 
  }finally{held?.resolve();globalThis.fetch=originalFetch;await runtime.close();}
 });
 
+test('shared: concurrent requests own different instances and sessions in one OpenCode 1 process', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true}),labels=['SHARED_SIMPLE_A','SHARED_SIMPLE_B','SHARED_SIMPLE_C','SHARED_SIMPLE_D'];
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ const before=requests.length,beforeWorkers=(await observations()).length;
+ const jobs=labels.map(async label=>{const response=await request({messages:[{role:'system',content:'SYSTEM_'+label},{role:'user',content:label}],stream:true},instance);assert.equal(response.status,200,response.status===200?'':await response.text());return response.text();});
+ const all=Promise.all(jobs);void all.catch(()=>{});
+ try{
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Shared requests finished before overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Shared requests did not reach concurrent inference');})]);
+  assert.equal(instance.active,4);assert.equal(instance.shared.entries.size,1);
+  for(const pending of parallelRequests.values())pending.release.resolve();
+  const text=await all;for(const [i,label] of labels.entries())assert.ok(text[i].includes(label));
+  await instance.drain();
+  assert.equal(requests.length,before+4);
+  for(const label of labels){const sent=requests.slice(before).find(r=>r.body.messages.some(m=>m.content===label));assert.equal(sent.body.messages.find(m=>m.role==='system').content,'SYSTEM_'+label);assert.equal(sent.body.messages.filter(m=>m.role==='user').length,1);assert.equal(sent.auth,'Bearer fixture-refreshed-access');}
+  const workers=(await observations()).slice(beforeWorkers);
+  assert.equal(new Set(workers.map(w=>w.pid)).size,1);assert.equal(new Set(workers.map(w=>w.directory)).size,4);
+  for(const worker of workers)assert.equal(await realpath(worker.cwd),await realpath(workingDirectory));
+  assert.equal(await readFile(path.join(workingDirectory,'keep.txt'),'utf8'),'user-owned workspace');
+  assert.equal(await readFile(path.join(workingDirectory,'opencode.json'),'utf8'),projectConfig);
+  const entry=[...instance.shared.entries.values()][0];assert.equal(entry.refs,0);
+  assert.deepEqual(await readdir(path.join(entry.process.home,'instances')),[],'Every request instance is confirmed disposed and removed');
+ }finally{for(const pending of parallelRequests.values())pending.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+});
+
+test('shared: identical tool names retain request schemas, permissions and tool-result histories', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),before=requests.length;
+ const markers=['SHARED_TOOL_A','SHARED_TOOL_B'];
+ parallelRequests=new Map(markers.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ const tools=markers.map((_,i)=>{const key=i?'onlyB':'onlyA';return[{type:'function',function:{name:'lookup',strict:true,description:'PRIVATE_SCHEMA_'+key,parameters:{type:'object',properties:{[key]:{type:'string',const:key}},required:[key],additionalProperties:false}}}];});
+ const bodies=markers.map((marker,i)=>({messages:[{role:'system',content:'TOOLS_SYSTEM_'+i},{role:'user',content:marker}],tools:tools[i]}));
+ const jobs=bodies.map(async body=>{const response=await request(body,instance);assert.equal(response.status,200,response.status===200?'':await response.text());return response.json();});
+ const all=Promise.all(jobs);void all.catch(()=>{});
+ try{
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Tools did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Tool overlap timed out');})]);
+  assert.equal(instance.shared.entries.size,1);for(const p of parallelRequests.values())p.release.resolve();
+  const results=await all;
+  for(const [i,result] of results.entries()){
+   const key=i?'onlyB':'onlyA',call=result.choices[0].message.tool_calls[0];
+   assert.equal(call.function.name,'lookup');assert.deepEqual(JSON.parse(call.function.arguments),{[key]:key});
+   const sent=requests.slice(before).find(r=>r.body.messages.some(m=>m.content===markers[i]));
+   assert.equal(sent.body.tools.length,1);assert.deepEqual(Object.keys(sent.body.tools[0].function.parameters.properties),[key]);
+   const next=await request({...bodies[i],messages:[...bodies[i].messages,result.choices[0].message,{role:'tool',tool_call_id:call.id,content:'PRIVATE_RESULT_'+key}]},instance);
+   assert.equal(next.status,200);assert.equal((await next.json()).choices[0].message.content,'RESULT_'+markers[i]);
+   const history=requests.at(-1).body.messages;assert.equal(history.find(m=>m.role==='tool').content,'PRIVATE_RESULT_'+key);
+  }
+  await instance.drain();assert.equal(requests.length,before+4,'No hidden tool continuation inference');
+ }finally{for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+});
+
+test('shared: cancelling after first output preserves other sessions and the shared process', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),cancel=new AbortController(),labels=['SHARED_CANCEL_B','SHARED_CANCEL_C'];
+ pausedStream={started:Promise.withResolvers(),release:Promise.withResolvers()};
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ const cancelled=instance.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'oc-default',messages:[{role:'user',content:'HOLD_AFTER_FIRST_OUTPUT'}],stream:true}),signal:cancel.signal});
+ const jobs=labels.map(async label=>{const response=await request({messages:[{role:'user',content:label}],stream:true},instance);assert.equal(response.status,200);return response.text();});
+ const all=Promise.all(jobs);void all.catch(()=>{});
+ try{
+  const response=await cancelled;assert.equal(response.status,200);
+  const iterator=sseEvents(response.body);await iterator.next();assert.equal((await iterator.next()).value.choices[0].delta.content,'First streamed text.');
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Peers finished before cancellation');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Peers did not overlap');})]);
+  const pid=[...instance.shared.entries.values()][0].process.worker.child.pid;
+  cancel.abort();await Array.fromAsync(iterator);await instance.drain();
+  assert.equal(instance.shared.entries.size,1);assert.equal([...instance.shared.entries.values()][0].process.worker.child.pid,pid);
+  assert.equal([...instance.shared.entries.values()][0].refs,2);
+  const next=await request({messages:[{role:'user',content:'SHARED_AFTER_CANCEL'}]},instance);assert.equal(next.status,200);await next.json();
+  assert.equal([...instance.shared.entries.values()][0].process.worker.child.pid,pid);
+  for(const p of parallelRequests.values())p.release.resolve();
+  const text=await all;for(const [i,label] of labels.entries())assert.ok(text[i].includes(label));
+  await instance.drain();assert.equal([...instance.shared.entries.values()][0].refs,0);
+ }finally{cancel.abort();pausedStream.release.resolve();for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled([cancelled,...jobs]);parallelRequests=undefined;pausedStream=undefined;}
+});
+
+test('shared: local OpenCode providers keep their own authentication and model process groups', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true,models:{...options.models,saved:{model:'fixture-api/mock',context:100000,output:1000}}});
+ const authBefore=await readFile(authFile,'utf8'),labels=['SHARED_KEY_A1','SHARED_KEY_B1','SHARED_KEY_A2','SHARED_KEY_B2'],before=requests.length;
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ const jobs=labels.map(async(label,i)=>{const response=await instance.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:i%2?'saved':'oc-default',messages:[{role:'user',content:label}],stream:true})},'gateway-key-is-not-an-upstream-credential');assert.equal(response.status,200,response.status===200?'':await response.text());return response.text();});
+ const all=Promise.all(jobs);void all.catch(()=>{});
+ try{
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Credential requests did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Credential overlap timed out');})]);
+  assert.equal(instance.shared.entries.size,2);assert.equal(new Set([...instance.shared.entries.values()].map(e=>e.process.worker.child.pid)).size,2);
+  for(const [i,label] of labels.entries())assert.equal(requests.slice(before).find(r=>r.body.messages.some(m=>m.content===label)).auth,i%2?'Bearer fixture-saved-api-key':'Bearer fixture-refreshed-access');
+  for(const p of parallelRequests.values())p.release.resolve();await all;await instance.drain();
+  assert.equal(await readFile(authFile,'utf8'),authBefore);assert.equal(await readFile(path.join(configDir,'opencode.json'),'utf8'),originalConfig);
+ }finally{for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+});
+
+test('shared: failed instance teardown quarantines its process until unaffected peers finish', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),originalFetch=globalThis.fetch;
+ const labels=['SHARED_CLEANUP_A','SHARED_CLEANUP_B'];let failed=false;
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ globalThis.fetch=async(url,init)=>{
+  if(String(url).endsWith('/instance/dispose')){
+   const directory=decodeURIComponent(new Headers(init.headers).get('x-opencode-directory'));
+   const body=JSON.parse(await readFile(path.join(directory,'.bridge-request.json'),'utf8')).body;
+   if(body.messages.some(m=>m.content===labels[0])){failed=true;throw new Error('Synthetic instance disposal failure');}
+  }
+  return originalFetch(url,init);
+ };
+ const jobs=labels.map(async label=>{const response=await request({messages:[{role:'user',content:label}],stream:true},instance);assert.equal(response.status,200);return response.text();});
+ const all=Promise.all(jobs);void all.catch(()=>{});
+ try{
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Cleanup requests did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Cleanup overlap timed out');})]);
+  const old=[...instance.shared.entries.values()][0],pid=old.process.worker.child.pid;
+  parallelRequests.get(labels[0]).release.resolve();await jobs[0];await instance.drain();
+  assert.equal(failed,true);assert.equal(instance.shared.entries.size,0);assert.equal(old.refs,1);assert.equal(old.process.worker.child.exitCode,null);
+  const next=await request({messages:[{role:'user',content:'SHARED_CLEAN_PROCESS'}]},instance);assert.equal(next.status,200);await next.json();
+  assert.notEqual([...instance.shared.entries.values()][0].process.worker.child.pid,pid);
+  parallelRequests.get(labels[1]).release.resolve();assert.ok((await jobs[1]).includes(labels[1]));await instance.drain();
+  assert.ok(old.process.worker.exited);assert.equal(instance.shared.all.size,1);
+ }finally{globalThis.fetch=originalFetch;for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+});
+
+test('shared: three client protocols and retired configuration generations keep separate live sessions', {timeout:90000}, async()=>{
+ const runtime=new ProxyRuntime({file:path.join(home,'shared-generations.json'),settings:{mode:'global',command,discoverModels:false,workerSharing:true,workerReuse:true,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'shared-gateway-fixture',enabled:true}]}});
+ const protocols=['chat','responses','anthropic'],labels=protocols.map(p=>'SHARED_PROTOCOL_'+p),before=requests.length;
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ let jobs=[];
+ try{
+  await runtime.startGateway();await runtime.warmup;await runtime.current.bridge.drain();
+  const old=runtime.current;
+  jobs=protocols.map(async(protocol,i)=>{const endpoint={chat:'chat/completions',responses:'responses',anthropic:'messages'}[protocol],body={model:'oc-default',stream:true,...(protocol==='responses'?{input:labels[i]}:{messages:[{role:'user',content:labels[i]}],...(protocol==='anthropic'?{max_tokens:100}:{})})};const response=await runtime.fetch('http://proxy/v1/'+endpoint,{method:'POST',body:JSON.stringify(body)},undefined,{id:'shared'});assert.equal(response.status,200,response.status===200?'':await response.text());return response.text();});
+  const all=Promise.all(jobs);void all.catch(()=>{});
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Protocol requests did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Protocol overlap timed out');})]);
+  const oldEntry=[...old.bridge.shared.entries.values()][0],oldPID=oldEntry.process.worker.child.pid;
+  assert.equal(old.active,3);assert.equal(old.bridge.shared.entries.size,1);
+  await runtime.save({...runtime.settings,maxIdleWorkers:1});await runtime.warmup;await runtime.current.bridge.drain();
+  assert.notEqual(runtime.current,old);assert.equal(oldEntry.process.worker.child.exitCode,null);
+  assert.notEqual([...runtime.current.bridge.shared.entries.values()][0].process.worker.child.pid,oldPID);
+  for(const p of parallelRequests.values())p.release.resolve();const text=await all;
+  for(const [i,terminal] of ['[DONE]','response.completed','message_stop'].entries()){assert.ok(text[i].includes(labels[i]));assert.ok(text[i].includes(terminal));}
+  const next=await runtime.fetch('http://proxy/v1/responses',{method:'POST',body:JSON.stringify({model:'oc-default',input:'SHARED_NEW_GENERATION'})},undefined,{id:'shared'});assert.equal(next.status,200);await next.json();
+  await old.closing;await runtime.current.bridge.drain();assert.ok(oldEntry.process.worker.exited);assert.equal(requests.length,before+4);
+ }finally{for(const p of parallelRequests.values())p.release.resolve();await runtime.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+});
+
+test('shared: sustained memory comparison uses eight simultaneous real OpenCode requests', {timeout:240000}, async t=>{
+ const output=process.env.OPENCODE_PROXY_MEMORY_REPORT;
+ if(!output){t.skip('Set OPENCODE_PROXY_MEMORY_REPORT to opt into the local memory comparison.');return;}
+ const count=Number(process.env.OPENCODE_PROXY_MEMORY_CONCURRENCY??8);assert.ok(Number.isInteger(count)&&count>=2&&count<=16);
+ if(!refreshes){const login=await request({messages:[{role:'user',content:'MEMORY_LOGIN'}]});assert.equal(login.status,200);await login.json();await bridge.drain();}
+ const report={platform:process.platform,concurrentRequests:count,results:[]};
+ for(const shared of [false,true]){
+  const instance=new OpenCodeBridge({...options,onFailure:undefined,workerSharing:shared,workerReuse:true,timeoutMs:0,startupTimeoutMs:90000});
+  const labels=Array.from({length:count},(_,i)=>'MEMORY_'+Number(shared)+'_'+i),before=requests.length,beforeWorkers=(await observations()).length,versions=new Set();
+  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+  const jobs=labels.map(async label=>{const response=await request({messages:[{role:'user',content:label}],stream:true},instance);assert.equal(response.status,200,response.status===200?'':await response.text());versions.add(response.headers.get('x-opencode-version'));const text=await response.text();assert.ok(text.includes(label));assert.match(text,/\[DONE\]/);});
+  const all=Promise.all(jobs);void all.catch(()=>{});
+  try{
+   await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Memory requests did not overlap');}),delay(120000,undefined,{ref:false}).then(()=>{throw new Error('Memory overlap timed out');})]);
+   assert.equal(instance.active,count);
+   // Authentication fixture observations come from the native OpenCode process,
+   // even when TEST_OPENCODE_COMMAND uses a launcher process on Linux.
+   const pids=[...new Set((await observations()).slice(beforeWorkers).map(w=>w.pid))];
+   assert.equal(pids.length,shared?1:count);
+   const samples=[];for(let i=0;i<3;i++){await delay(750);samples.push(await processMemory(pids));}
+   const max=key=>samples[0][key]===null?null:Math.max(...samples.map(s=>s[key]));
+   const row={shared,processes:pids.length,workingSetBytes:max('workingSetBytes'),privateResidentBytes:max('privateResidentBytes'),privateCommittedBytes:max('privateCommittedBytes'),samples};
+   for(const p of parallelRequests.values())p.release.resolve();await all;await instance.drain();assert.equal(requests.length,before+count);
+   row.runtimeVersions=[...versions];report.results.push(row);console.log('MEMORY '+JSON.stringify(row));await writeFile(output,JSON.stringify(report,null,2),{mode:0o600});
+  }finally{for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
+ }
+ const [exclusive,shared]=report.results;
+ assert.ok(shared.privateResidentBytes<exclusive.privateResidentBytes*.75,'Shared instances should materially reduce this fixture\'s private resident memory.');
+});
+
+test('shared: packaged server runs concurrent protocol requests through one native OpenCode 1 process', {timeout:90000}, async t=>{
+ if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate packaged shared instances.');return;}
+ const file=path.join(home,'packaged-shared.json'),beforeWorkers=(await observations()).length,before=requests.length;
+ await writeFile(file,JSON.stringify({mode:'global',command,workerSharing:true,workerReuse:true,discoverModels:false,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'packaged-shared-key',enabled:true}]}));
+ const labels=['PACKAGED_SHARED_CHAT','PACKAGED_SHARED_RESPONSES','PACKAGED_SHARED_MESSAGES'];
+ parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ let child,exited,base,jobs=[];
+ try{
+  const ready=Promise.withResolvers();let output='',errors='';
+  child=spawn(process.env.TEST_PACKAGED_PROXY,['--config',file,'--admin-port','0'],{env:{...process.env,OPENCODE_PROXY_ADMIN_KEY:'packaged-shared-admin'},windowsHide:true,stdio:['ignore','pipe','pipe']});
+  child.once('error',ready.reject);exited=new Promise(resolve=>child.once('exit',code=>{ready.reject(new Error('Packaged shared server exited: '+code+' '+errors));resolve();}));
+  child.stderr.on('data',data=>{errors=(errors+data).slice(-16000);});
+  child.stdout.on('data',data=>{output+=data;const line=output.split(/\r?\n/).find(l=>l.startsWith('OPENCODE_PROXY_READY '));if(line)ready.resolve(JSON.parse(line.slice('OPENCODE_PROXY_READY '.length)));});
+  const state=await Promise.race([ready.promise,delay(30000,undefined,{ref:false}).then(()=>{throw new Error('Packaged shared startup timed out: '+errors);})]);base=state.adminURL;
+  jobs=['chat/completions','responses','messages'].map(async(route,i)=>{const body={model:'oc-default',stream:true,...(i===1?{input:labels[i]}:{messages:[{role:'user',content:labels[i]}],...(i===2?{max_tokens:100}:{})})};const response=await fetch(state.endpoint+'/'+route,{method:'POST',headers:{authorization:'Bearer packaged-shared-key','content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,200,response.status===200?'':await response.text());return response.text();});
+  const all=Promise.all(jobs);void all.catch(()=>{});
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Packaged requests did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Packaged overlap timed out: '+errors);})]);
+  const workers=(await observations()).slice(beforeWorkers);assert.equal(new Set(workers.map(w=>w.pid)).size,1);
+  for(const p of parallelRequests.values())p.release.resolve();const text=await all;
+  for(const [i,terminal] of ['[DONE]','response.completed','message_stop'].entries()){assert.ok(text[i].includes(labels[i]));assert.ok(text[i].includes(terminal));}
+  assert.equal(requests.length,before+3);assert.equal(await readFile(path.join(configDir,'opencode.json'),'utf8'),originalConfig);
+ }finally{
+  for(const p of parallelRequests.values())p.release.resolve();
+  if(base)await fetch(base+'/admin/shutdown',{method:'POST',headers:{authorization:'Bearer packaged-shared-admin','content-type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)}).then(r=>r.arrayBuffer()).catch(()=>{});
+  if(child){await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>child.kill())]);await exited;}
+  await Promise.allSettled(jobs);parallelRequests=undefined;
+ }
+});
+
+test('resources: queued cold starts reuse a worker returned while waiting without starting a spare', {timeout:60000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workerReuse:true,maxIdleWorkers:1}),releases=[];
+ let clean;
+ try{
+  await instance.prewarm(['oc-default']);await instance.drain();instance.pauseWarmup();
+  clean=instance.pool.take(instance.workerKey(instance.acceptedModels['oc-default']));
+  const pid=clean.child.pid,before=requests.length;
+  for(let i=0;i<workerStartupGate.limit;i++)releases.push(await workerStartupGate.acquire());
+  const responseTask=request({messages:[{role:'user',content:'QUEUED_REUSE'}],stream:true},instance);
+  try{
+   const deadline=Date.now()+5000;while(!workerStartupGate.queue.length&&Date.now()<deadline)await delay(10);
+   assert.equal(workerStartupGate.queue.length,1);
+   await instance.pool.put(clean);clean=undefined;
+  }finally{for(const release of releases)release();}
+  const response=await responseTask;
+  assert.equal(response.status,200);assert.equal(response.headers.get('x-opencode-worker-reused'),'true');
+  await response.text();await instance.drain();
+  assert.equal(instance.pool.workers.size,1);assert.equal(instance.pool.idle[0].child.pid,pid);
+  assert.equal(requests.length,before+1);
+ }finally{for(const release of releases)release();if(clean)await instance.pool.discard(clean);await instance.close();}
+});
+
+test('resources: a completion burst resets only retained workers and preserves concurrent request isolation', {timeout:90000}, async()=>{
+ const reports=[],instance=new OpenCodeBridge({...options,workerReuse:true,maxIdleWorkers:2,onDiagnostics:r=>reports.push(r)}),originalFetch=globalThis.fetch;
+ const count=4,before=requests.length;
+ parallelRequests=new Map(Array.from({length:count},(_,i)=>['RESOURCE_ISOLATION_'+i,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
+ let resets=0,tasks=[];
+ globalThis.fetch=(url,init)=>{if(String(url).endsWith('/global/dispose'))resets++;return originalFetch(url,init);};
+ try{
+  tasks=[...parallelRequests.keys()].map(async marker=>{const response=await request({messages:[{role:'user',content:marker}],stream:true},instance);assert.equal(response.status,200);const text=await response.text();assert.ok(text.includes(marker));assert.match(text,/\[DONE\]/);});
+  await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Concurrent inference did not start');})]);
+  assert.equal(instance.active,count);assert.equal(instance.pool.workers.size,count);
+  for(const pending of parallelRequests.values())pending.release.resolve();
+  await Promise.all(tasks);await instance.drain();
+  assert.equal(resets,2);assert.equal(instance.pool.idle.length,2);assert.equal(instance.pool.workers.size,2);
+  assert.equal(reports.filter(r=>r.status==='completed').length,count);
+  assert.equal(requests.length,before+count);
+  for(const sent of requests.slice(before))assert.equal(sent.body.messages.filter(m=>m.role==='user').length,1);
+ }finally{for(const pending of parallelRequests.values())pending.release.resolve();await instance.close();await Promise.allSettled(tasks);globalThis.fetch=originalFetch;parallelRequests=undefined;}
+});
+
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{
   if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate the packaged server.');return;}
   const file=path.join(home,'managed-config.json');
@@ -1345,400 +1585,3 @@ test('managed20: packaged server uses real global OpenCode, aliases, defaults an
     await stop();await launch();const restarted=await(await admin('/admin/state')).json();assert.equal('statistics' in restarted,false);assert.equal(restarted.settings.modelOverrides['fixture-api/mock'].enabled,false);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].defaults.reasoning_effort,'max');assert.deepEqual(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningPreset,selectedPreset);assert.equal(restarted.settings.modelOverrides['fixture-api/native-variants'].reasoningVariants,undefined);assert.equal((await admin('/admin/model','POST',{target:'fixture-api/mock',patch:{enabled:true}})).status,200);
   }finally{await stop();}
 });
-
-test(
-  'channels: real OpenCode rotates isolated credentials, sticks all protocol/tool histories and preserves global auth',
-  { timeout: 240000 },
-  async () => {
-    const channels = [
-      {
-        id: 'pool',
-        name: 'Fixture channel',
-        protocol: 'openai-chat',
-        baseURL: baseURL + '/v1',
-        stickyTtlMs: 1000,
-        cooldownMs: 1000,
-        maxKeyAttempts: 2,
-        keys: [
-          { id: 'a', name: 'a', key: 'fixture-channel-a', enabled: true },
-          { id: 'b', name: 'b', key: 'fixture-channel-b', enabled: true }
-        ],
-        models: [{ alias: 'pooled', id: 'mock', context: 100000, output: 1000 }]
-      }
-    ];
-    const authBefore = await readFile(authFile, 'utf8'),
-      configBefore = await readFile(path.join(configDir, 'opencode.json'), 'utf8');
-    const runtime = new ProxyRuntime({
-      file: path.join(home, 'channel-settings.json'),
-      settings: {
-        ...options,
-        onFailure: undefined,
-        workerReuse: true,
-        discoverModels: false,
-        host: '127.0.0.1',
-        port: 0,
-        models: { global: { model: 'fixture-api/mock', context: 100000, output: 1000 } },
-        channels,
-        modelOverrides: {},
-        apiKeys: []
-      }
-    });
-    let now = 0;
-    runtime.channelPool.now = () => now;
-    const client = { id: 'channel-client' };
-    const send = (protocol, body, session) =>
-      runtime.fetch(
-        'http://proxy/v1/' + { chat: 'chat/completions', responses: 'responses', anthropic: 'messages' }[protocol],
-        { method: 'POST', headers: session ? { 'x-opencode-session-id': session } : {}, body: JSON.stringify(body) },
-        undefined,
-        client
-      );
-    function unpack(protocol, result, events) {
-      if (protocol === 'chat') {
-        const message = events
-          ? {
-              role: 'assistant',
-              content: events.map((e) => e.choices?.[0]?.delta.content ?? '').join(''),
-              tool_calls: toolCalls(events).map(({ index, ...call }) => call)
-            }
-          : result.choices[0].message;
-        return {
-          calls: message.tool_calls ?? [],
-          messages: [
-            message,
-            ...(message.tool_calls ?? [])
-              .toReversed()
-              .map((c) => ({ role: 'tool', tool_call_id: c.id, content: 'done ' + c.function.name }))
-          ]
-        };
-      }
-      if (protocol === 'responses') {
-        const final = events ? events.at(-1).response : result,
-          calls = final.output.filter((c) => c.type === 'function_call');
-        return {
-          calls,
-          input: [
-            ...final.output,
-            ...calls
-              .toReversed()
-              .map((c) => ({ type: 'function_call_output', call_id: c.call_id, output: 'done ' + c.name }))
-          ]
-        };
-      }
-      const content = events
-          ? events
-              .filter((e) => e.type === 'content_block_start')
-              .map((e) => {
-                const b = { ...e.content_block },
-                  deltas = events.filter((d) => d.type === 'content_block_delta' && d.index === e.index);
-                if (b.type === 'text') b.text = deltas.map((d) => d.delta.text ?? '').join('');
-                if (b.type === 'tool_use') b.input = JSON.parse(deltas.map((d) => d.delta.partial_json ?? '').join(''));
-                return b;
-              })
-          : result.content,
-        calls = content.filter((c) => c.type === 'tool_use');
-      return {
-        calls,
-        messages: [
-          { role: 'assistant', content },
-          {
-            role: 'user',
-            content: calls
-              .toReversed()
-              .map((c) => ({ type: 'tool_result', tool_use_id: c.id, content: 'done ' + c.name }))
-          }
-        ]
-      };
-    }
-    const definitions = ['weather', 'clock'].map((name) => ({
-      name,
-      parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] }
-    }));
-    try {
-      const catalog = await runtime.models();
-      assert.deepEqual(
-        catalog.map((m) => m.id),
-        ['global', 'pooled']
-      );
-      const response = await send('chat', { model: 'global', messages: [{ role: 'user', content: 'hello' }] });
-      assert.equal(response.status, 200);
-      await response.text();
-      assert.equal(requests.at(-1).auth, 'Bearer fixture-saved-api-key');
-      let index = 0;
-      for (const protocol of ['chat', 'responses', 'anthropic'])
-        for (const stream of [false, true]) {
-          const session = 'tools-' + protocol + '-' + stream,
-            expected = index++ % 2 === 0 ? 'Bearer fixture-channel-a' : 'Bearer fixture-channel-b';
-          const tools = definitions.map((t) =>
-            protocol === 'chat'
-              ? { type: 'function', function: t }
-              : protocol === 'responses'
-                ? { type: 'function', ...t }
-                : { name: t.name, input_schema: t.parameters }
-          );
-          const body = {
-            model: 'pooled',
-            stream,
-            tools,
-            ...(protocol === 'responses'
-              ? { input: 'call tools' }
-              : {
-                  messages: [{ role: 'user', content: 'call tools' }],
-                  ...(protocol === 'anthropic' ? { max_tokens: 1000 } : {})
-                })
-          };
-          const first = await send(protocol, body, session);
-          assert.equal(first.status, 200, await first.clone().text());
-          assert.equal(first.headers.get('x-opencode-session-id'), session);
-          const events = stream ? await Array.fromAsync(sseEvents(first.body)) : undefined,
-            result = stream ? undefined : await first.json();
-          assert.equal(requests.at(-1).auth, expected);
-          const history = unpack(protocol, result, events);
-          assert.equal(history.calls.length, 2);
-          // An unrelated new conversation must not move the existing binding.
-          const unrelated = await send(
-            'chat',
-            { model: 'pooled', messages: [{ role: 'user', content: 'hello' }] },
-            'other-' + index
-          );
-          await unrelated.text();
-          index++;
-          const follow = {
-            ...body,
-            stream: false,
-            ...(protocol === 'responses'
-              ? { input: [{ role: 'user', content: body.input }, ...history.input] }
-              : { messages: [...body.messages, ...history.messages] })
-          };
-          const final = await send(protocol, follow, session);
-          assert.equal(final.status, 200);
-          assert.match(await final.text(), /全局 OpenCode/);
-          assert.equal(requests.at(-1).auth, expected);
-          assert.equal(requests.at(-1).body.messages.filter((m) => m.role === 'tool').length, 2);
-        }
-      // Multiple active requests for one session use the same Key and exclusive native workers.
-      const before = requests.length;
-      const parallel = await Promise.all(
-        Array.from({ length: 3 }, () =>
-          send('chat', { model: 'pooled', messages: [{ role: 'user', content: 'parallel' }] }, 'parallel')
-        )
-      );
-      for (const response of parallel) {
-        assert.equal(response.status, 200);
-        await response.text();
-      }
-      assert.equal(new Set(requests.slice(before).map((r) => r.auth)).size, 1);
-      const original = requests.at(-1).auth;
-      now = 2000;
-      runtime.channelPool.prune();
-      assert.equal(runtime.channelPool.summary(runtime.current.channels.channels)[0].bindings, 0);
-      const expired = await send(
-        'chat',
-        { model: 'pooled', messages: [{ role: 'user', content: 'expired' }] },
-        'parallel'
-      );
-      await expired.text();
-      assert.notEqual(requests.at(-1).auth, original);
-      assert.equal(await readFile(authFile, 'utf8'), authBefore);
-      assert.equal(await readFile(path.join(configDir, 'opencode.json'), 'utf8'), configBefore);
-    } finally {
-      await runtime.close();
-    }
-  }
-);
-
-test(
-  'channels: real OpenCode auth/rate failures switch keys before output and interruption releases binding',
-  { timeout: 120000 },
-  async () => {
-    const channels = [
-      {
-        id: 'failover',
-        name: 'Failure fixture',
-        protocol: 'openai-chat',
-        baseURL: baseURL + '/v1',
-        cooldownMs: 1000,
-        keys: [
-          { id: 'a', name: 'a', key: 'fixture-channel-a', enabled: true },
-          { id: 'b', name: 'b', key: 'fixture-channel-b', enabled: true }
-        ],
-        models: [{ alias: 'pooled', id: 'mock', context: 100000, output: 1000 }]
-      }
-    ];
-    const runtime = new ProxyRuntime({
-      file: path.join(home, 'channel-failures.json'),
-      settings: {
-        ...options,
-        onFailure: undefined,
-        workerReuse: true,
-        discoverModels: false,
-        host: '127.0.0.1',
-        port: 0,
-        channels,
-        modelOverrides: {},
-        apiKeys: []
-      }
-    });
-    // Keep scheduler time independent of native startup/inference duration.
-    // On slower runners the real one-second cooldown can expire before the
-    // successful fallback has completed, even though cooldown works correctly.
-    let healthNow = Date.now();
-    runtime.channelPool.now = () => healthNow;
-    const send = (content, session, signal) =>
-      runtime.fetch(
-        'http://proxy/v1/chat/completions',
-        {
-          method: 'POST',
-          signal,
-          headers: { 'x-opencode-session-id': session },
-          body: JSON.stringify({ model: 'pooled', stream: true, messages: [{ role: 'user', content }] })
-        },
-        undefined,
-        { id: 'client' }
-      );
-    try {
-      for (const [marker, status] of [
-        ['CHANNEL_FAULT_AUTH', 'invalid'],
-        ['CHANNEL_FAULT_RATE', 'cooling']
-      ]) {
-        runtime.channelPool.reset('failover', 'a');
-        runtime.channelPool.channels.get('failover')?.bindings.clear();
-        if (runtime.channelPool.channels.has('failover')) runtime.channelPool.channels.get('failover').cursor = 0;
-        const response = await send(marker, marker);
-        assert.equal(response.status, 200, await response.clone().text());
-        assert.match(JSON.stringify(await Array.fromAsync(sseEvents(response.body))), /全局 OpenCode/);
-        assert.equal(requests.at(-1).auth, 'Bearer fixture-channel-b');
-        assert.equal(runtime.state().channelStatus[0].keys[0].status, status);
-        if (status === 'cooling') {
-          const retryAt = runtime.state().channelStatus[0].keys[0].retryAt;
-          assert.ok(retryAt > healthNow);
-          healthNow = retryAt;
-          assert.equal(runtime.state().channelStatus[0].keys[0].status, 'ready');
-        }
-      }
-      pausedStream = { started: Promise.withResolvers(), release: Promise.withResolvers(), finished: false };
-      const controller = new AbortController(),
-        response = await send('HOLD_AFTER_FIRST_OUTPUT', 'cancel', controller.signal);
-      const iterator = sseEvents(response.body);
-      await iterator.next();
-      await pausedStream.started.promise;
-      assert.equal(
-        runtime.state().channelStatus[0].keys.reduce((n, k) => n + k.active, 0),
-        1
-      );
-      controller.abort();
-      pausedStream.release.resolve();
-      await iterator.return();
-      await delay(100);
-      assert.equal(
-        runtime.state().channelStatus[0].keys.reduce((n, k) => n + k.active, 0),
-        0
-      );
-      const restored = await send('hello', 'cancel');
-      assert.equal(restored.status, 200);
-      await restored.text();
-    } finally {
-      pausedStream?.release.resolve();
-      await runtime.close();
-    }
-  }
-);
-
-test(
-  'channels: native OpenCode SDK supports each configured upstream protocol and its credential headers',
-  { timeout: 120000 },
-  async () => {
-    const received = [];
-    const server = http.createServer(async (req, res) => {
-      try {
-        let text = '';
-        for await (const chunk of req) text += chunk;
-        received.push({
-          url: req.url,
-          auth: req.headers.authorization,
-          key: req.headers['x-api-key'],
-          body: JSON.parse(text)
-        });
-        const chunks = [{ role: 'assistant' }, { content: 'NATIVE_CHANNEL_OK' }, {}].map((delta, index) => ({
-          id: 'upstream',
-          model: 'mock',
-          object: 'chat.completion.chunk',
-          created: 1,
-          choices: [{ index: 0, delta, finish_reason: index === 2 ? 'stop' : null }],
-          ...(index === 2 ? { usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } } : {})
-        }));
-        let response = new Response(
-          chunks.map((chunk) => 'data: ' + JSON.stringify(chunk) + '\n\n').join('') + 'data: [DONE]\n\n',
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
-        const protocol = req.url.endsWith('/messages')
-          ? 'anthropic'
-          : req.url.endsWith('/responses')
-            ? 'responses'
-            : 'chat';
-        response = await adaptResponse(protocol, response, { model: 'mock', stream: true, input: 'hello' });
-        res.writeHead(response.status, Object.fromEntries(response.headers));
-        for await (const chunk of response.body) res.write(chunk);
-        res.end();
-      } catch (error) {
-        res.writeHead(500, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: error.message } }));
-      }
-    });
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const channels = ['openai-chat', 'openai-responses', 'anthropic'].map((protocol, index) => ({
-      id: 'sdk' + index,
-      name: protocol,
-      protocol,
-      baseURL: 'http://127.0.0.1:' + server.address().port + '/v1',
-      keys: [
-        { id: 'a', name: 'A', key: 'native-sdk-a', enabled: true },
-        { id: 'b', name: 'B', key: 'native-sdk-b', enabled: true }
-      ],
-      models: [{ alias: 'sdk' + index, id: 'mock', context: 100000, output: 1000 }]
-    }));
-    const runtime = new ProxyRuntime({
-      file: path.join(home, 'channel-upstream-protocols.json'),
-      settings: {
-        ...options,
-        onFailure: undefined,
-        discoverModels: false,
-        workerReuse: true,
-        channels,
-        modelOverrides: {},
-        apiKeys: []
-      }
-    });
-    try {
-      for (const [index, channel] of channels.entries())
-        for (const stream of [false, true]) {
-          const response = await runtime.fetch(
-            'http://proxy/v1/chat/completions',
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                model: channel.models[0].alias,
-                stream,
-                messages: [{ role: 'user', content: 'hello' }]
-              })
-            },
-            undefined,
-            { id: 'sdk-client' }
-          );
-          assert.equal(response.status, 200, await response.clone().text());
-          const output = await response.text();
-          assert.match(output, /NATIVE_CHANNEL_OK/);
-          const sent = received.at(-1),
-            key = stream ? 'native-sdk-b' : 'native-sdk-a';
-          assert.equal(index === 2 ? sent.key : sent.auth, index === 2 ? key : 'Bearer ' + key);
-          assert.equal(sent.body.model, 'mock');
-          assert.equal(sent.body.stream, true);
-          assert.equal(sent.url, ['/v1/chat/completions', '/v1/responses', '/v1/messages'][index]);
-        }
-      assert.equal(received.length, 6);
-    } finally {
-      await runtime.close();
-      await new Promise((resolve) => server.close(resolve));
-    }
-  }
-);
