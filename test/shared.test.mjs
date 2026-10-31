@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SharedProcesses, disposalEvents } from '../lib/shared-processes.mjs';
 import { BridgeWorker } from '../lib/worker-plugin.mjs';
-import { nativeToolName } from '../lib/protocol.mjs';
-import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
+import { nativeToolName,toNativeHistory } from '../lib/protocol.mjs';
+import { sharedContract } from '../lib/shared-contract.mjs';
+import { normalizeConfig } from '../lib/bridge.mjs';
+import { mkdtemp,mkdir,writeFile,readFile,readdir,rm,realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -48,6 +50,17 @@ test('credentials and generations use separate process keys and shutdown owns dr
  }finally{await pool.close();}
 });
 
+test('idle tool variants yield space before evicting another protected model',async()=>{
+ const pool=new SharedProcesses(config,()=>true),disposed=[];
+ const acquire=(key,base)=>pool.acquire(key,async()=>fake(async()=>disposed.push(key)),undefined,base);
+ try{
+  const a=await acquire('model-a/tools-1','model-a'),b=await acquire('model-b/empty','model-b'),c=await acquire('model-a/tools-2','model-a');
+  await b.release();await a.release();await c.release();
+  assert.ok(pool.has('model-b/empty'));assert.ok(pool.has('model-a/tools-2'));assert.equal(pool.has('model-a/tools-1'),false);
+ }finally{await pool.close();}
+ assert.equal(disposed.length,3);
+});
+
 test('instance disposal requires its own directory acknowledgement and does not retain unrelated events',async()=>{
  const events=[];let stopped=false;
  const iterator=(async function*(){while(!stopped){if(events.length)yield events.shift();else await delay(1);}})();
@@ -61,27 +74,56 @@ test('instance disposal requires its own directory acknowledgement and does not 
  }finally{await confirmations.close(()=>{stopped=true;});}
 });
 
-test('shared plugin rejects foreign sessions, unregistered local tools and directories outside its instance root',async()=>{
+test('shared contracts isolate complete tool schemas and permissions but exclude request text and sampling',()=>{
+ const tool={type:'function',function:{name:'lookup',strict:true,parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}};
+ const a={tools:[tool],messages:[{role:'user',content:'PRIVATE_A'}],temperature:0},b={...a,messages:[{role:'user',content:'PRIVATE_B'}],temperature:1};
+ assert.equal(sharedContract(a).hash,sharedContract(b).hash);
+ const changed=structuredClone(b);changed.tools[0].function.parameters.properties.city={type:'integer'};
+ assert.notEqual(sharedContract(a).hash,sharedContract(changed).hash);
+ assert.notEqual(sharedContract(a).hash,sharedContract({...a,tool_choice:'none'}).hash);
+ assert.notEqual(sharedContract(a).hash,sharedContract({...a,tools:[{...tool,function:{...tool.function,description:'Other contract'}}]}).hash);
+ const reordered={tools:[{function:{parameters:{required:['city'],properties:{city:{type:'string'}},type:'object'},strict:true,name:'lookup'},type:'function'}]};
+ assert.equal(sharedContract(a).hash,sharedContract(reordered).hash);
+ assert.ok(!JSON.stringify(sharedContract(a)).includes('PRIVATE_A'));
+ assert.throws(()=>normalizeConfig({mode:'global',workerSharing:true}),/真实工作目录/);
+ const history=toNativeHistory({messages:[{role:'user',content:'earlier'},{role:'assistant',content:'answer'},{role:'user',content:'next'}]},'session','model','/project/subdir','provider','/project');
+ assert.deepEqual(history.messages[1].info.path,{cwd:'/project/subdir',root:'/project'});
+});
+
+test('one real-directory plugin owns independent session histories, cancellation and release acknowledgements',{timeout:5000},async()=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'shared-plugin-contract-')),previous=process.env.OPENCODE_PROXY_SHARED_ROOT;
  process.env.OPENCODE_PROXY_SHARED_ROOT=root;
+ let plugin;
  try{
-  const plugins=[];
+  const directory=path.join(root,'real workspace 中文');await mkdir(directory);
+  const tools=[{type:'function',function:{name:'lookup'}}],contract=sharedContract({tools}),groupID=randomUUID();
+  await writeFile(path.join(root,'shared.json'),JSON.stringify({version:2,directory:await realpath(directory),contract,groupID,mcpURL:'http://127.0.0.1:1/private',mcpTimeout:1000}));
   for(const key of ['a','b']){
-   const directory=path.join(root,'instances',randomUUID(),'workspace');await mkdir(directory,{recursive:true});
-   const file=path.join(directory,'.bridge-request.json');
-   await writeFile(file,JSON.stringify({body:{model:'test',messages:[{role:'user',content:'PRIVATE_'+key}],tools:[{type:'function',function:{name:'allowed_'+key}}]},mcpURL:'http://127.0.0.1:1/'+key,mcpTimeout:1000}));
-   await writeFile(file+'.session','session-'+key);plugins.push(await BridgeWorker({directory}));
+   const home=path.join(root,'requests','session-'+key);await mkdir(home,{recursive:true});
+   await writeFile(path.join(home,'request.json'),JSON.stringify({sessionID:'session-'+key,requestID:'request-'+key,groupID,body:{model:'test',messages:[{role:'system',content:'SYSTEM_'+key},{role:'user',content:'PRIVATE_'+key}],tools}}));
   }
-  const a=plugins[0];
-  await a['tool.execute.before']({sessionID:'session-a',tool:nativeToolName('allowed_a')});
-  await assert.rejects(()=>a['tool.execute.before']({sessionID:'session-b',tool:nativeToolName('allowed_a')}),/does not own/);
-  await assert.rejects(()=>a['tool.execute.before']({sessionID:'session-a',tool:nativeToolName('allowed_b')}),/unregistered local tool/);
-  await assert.rejects(()=>a['tool.execute.before']({sessionID:'session-a',tool:'bash'}),/unregistered local tool/);
-  await assert.rejects(()=>a['chat.params']({sessionID:'session-b'},{}),/does not own/);
-  await assert.rejects(()=>a['experimental.chat.system.transform']({sessionID:'session-b'},{system:[]}),/does not own/);
-  await assert.rejects(()=>a['experimental.chat.messages.transform']({},{messages:[{info:{sessionID:'session-b'}}]}),/does not own/);
-  await assert.rejects(()=>BridgeWorker({directory:root}),/Unknown shared OpenCode instance/);
-  for(const plugin of plugins)await plugin.dispose();
-  await assert.rejects(()=>a['tool.execute.before']({sessionID:'session-a',tool:nativeToolName('allowed_a')}),/does not own/);
- }finally{if(previous===undefined)delete process.env.OPENCODE_PROXY_SHARED_ROOT;else process.env.OPENCODE_PROXY_SHARED_ROOT=previous;await rm(root,{recursive:true,force:true});}
+  plugin=await BridgeWorker({directory});
+  const outputs=['a','b'].map(key=>({messages:[{info:{sessionID:'session-'+key,model:{modelID:'model',providerID:'global'}},parts:[]}]}));
+  await Promise.all(outputs.map(output=>plugin['experimental.chat.messages.transform']({},output)));
+  for(const [i,key] of ['a','b'].entries()){assert.equal(outputs[i].messages[0].parts[0].text,'PRIVATE_'+key);const system={system:[]};await plugin['experimental.chat.system.transform']({sessionID:'session-'+key},system);assert.deepEqual(system.system,['SYSTEM_'+key]);}
+  const mixed={messages:[{info:{sessionID:'session-a'}},{info:{sessionID:'session-b'}}]};
+  await assert.rejects(()=>plugin['experimental.chat.messages.transform']({},mixed),/Mixed/);
+  await assert.rejects(()=>BridgeWorker({directory:root}),/does not own/);
+  await plugin['tool.execute.before']({sessionID:'session-b',tool:nativeToolName('lookup')});
+  await assert.rejects(()=>plugin['tool.execute.before']({sessionID:'session-a',tool:'bash'}),/unregistered local tool/);
+  await assert.rejects(()=>plugin['tool.execute.before']({sessionID:'../../foreign',tool:nativeToolName('lookup')}),/Invalid native session/);
+  const continuation=plugin['experimental.chat.messages.transform']({},outputs[0]);void continuation.catch(()=>{});
+  await writeFile(path.join(root,'requests','session-a','closing'),'');
+  await plugin.event({event:{type:'session.deleted',properties:{info:{id:'session-a'}}}});
+  await assert.rejects(continuation,/continuation was cancelled|closed/);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root,'requests','session-a','released.json'),'utf8')),{sessionID:'session-a',requestID:'request-a',groupID});
+  await assert.rejects(()=>plugin['tool.execute.before']({sessionID:'session-a',tool:nativeToolName('lookup')}),/closed/);
+  await plugin['tool.execute.before']({sessionID:'session-b',tool:nativeToolName('lookup')});
+  assert.deepEqual(await readdir(directory),[],'Plugin must not create proxy state in the project');
+  // A session file from another process group cannot join this instance.
+  const foreign=path.join(root,'requests','foreign');await mkdir(foreign);await writeFile(path.join(foreign,'request.json'),JSON.stringify({sessionID:'foreign',groupID:'other',body:{tools}}));
+  await assert.rejects(()=>plugin['tool.execute.before']({sessionID:'foreign',tool:nativeToolName('lookup')}),/does not own/);
+  const mismatch=path.join(root,'requests','mismatch');await mkdir(mismatch);await writeFile(path.join(mismatch,'request.json'),JSON.stringify({sessionID:'mismatch',groupID,body:{tools:[{type:'function',function:{name:'other'}}]}}));
+  await assert.rejects(()=>plugin['tool.execute.before']({sessionID:'mismatch',tool:nativeToolName('other')}),/does not own/);
+ }finally{await plugin?.dispose();if(previous===undefined)delete process.env.OPENCODE_PROXY_SHARED_ROOT;else process.env.OPENCODE_PROXY_SHARED_ROOT=previous;await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });

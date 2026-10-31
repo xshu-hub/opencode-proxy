@@ -1269,7 +1269,7 @@ function drawNetwork() {
       append(
         node("div", "card-body"),
         sharing.element,
-        hint("共享模式为每个请求建立独立实例和会话；同组请求共用进程，进程故障会影响同组请求。默认关闭。"),
+        hint("共享模式必须配置真实工作目录。同目录、模型及工具定义的请求共享实例和进程，各自使用独立会话；进程故障会影响同组请求。默认关闭。"),
         reuse.element,
         append(
           node("div", "form-grid section-title"),

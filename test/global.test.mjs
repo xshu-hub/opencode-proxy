@@ -1277,7 +1277,7 @@ test('hotpath: protocol terminal events do not wait for reset and next requests 
  }finally{held?.resolve();globalThis.fetch=originalFetch;await runtime.close();}
 });
 
-test('shared: concurrent requests own different instances and sessions in one OpenCode 1 process', {timeout:90000}, async()=>{
+test('shared: concurrent requests share the real-directory instance and own different sessions in one OpenCode 1 process', {timeout:90000}, async()=>{
  const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true}),labels=['SHARED_SIMPLE_A','SHARED_SIMPLE_B','SHARED_SIMPLE_C','SHARED_SIMPLE_D'];
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  const before=requests.length,beforeWorkers=(await observations()).length;
@@ -1292,17 +1292,17 @@ test('shared: concurrent requests own different instances and sessions in one Op
   assert.equal(requests.length,before+4);
   for(const label of labels){const sent=requests.slice(before).find(r=>r.body.messages.some(m=>m.content===label));assert.equal(sent.body.messages.find(m=>m.role==='system').content,'SYSTEM_'+label);assert.equal(sent.body.messages.filter(m=>m.role==='user').length,1);assert.equal(sent.auth,'Bearer fixture-refreshed-access');}
   const workers=(await observations()).slice(beforeWorkers);
-  assert.equal(new Set(workers.map(w=>w.pid)).size,1);assert.equal(new Set(workers.map(w=>w.directory)).size,4);
-  for(const worker of workers)assert.equal(await realpath(worker.cwd),await realpath(workingDirectory));
+  assert.equal(new Set(workers.map(w=>w.pid)).size,1);assert.equal(new Set(workers.map(w=>w.directory)).size,1);
+  for(const worker of workers){assert.equal(await realpath(worker.cwd),await realpath(workingDirectory));assert.equal(await realpath(worker.directory),await realpath(workingDirectory));}
   assert.equal(await readFile(path.join(workingDirectory,'keep.txt'),'utf8'),'user-owned workspace');
   assert.equal(await readFile(path.join(workingDirectory,'opencode.json'),'utf8'),projectConfig);
   const entry=[...instance.shared.entries.values()][0];assert.equal(entry.refs,0);
-  assert.deepEqual(await readdir(path.join(entry.process.home,'instances')),[],'Every request instance is confirmed disposed and removed');
+  assert.deepEqual(await readdir(path.join(entry.process.home,'requests')),[],'Every session release is confirmed and its private state removed');
  }finally{for(const pending of parallelRequests.values())pending.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
 });
 
 test('shared: identical tool names retain request schemas, permissions and tool-result histories', {timeout:90000}, async()=>{
- const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),before=requests.length;
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true}),before=requests.length;
  const markers=['SHARED_TOOL_A','SHARED_TOOL_B'];
  parallelRequests=new Map(markers.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  const tools=markers.map((_,i)=>{const key=i?'onlyB':'onlyA';return[{type:'function',function:{name:'lookup',strict:true,description:'PRIVATE_SCHEMA_'+key,parameters:{type:'object',properties:{[key]:{type:'string',const:key}},required:[key],additionalProperties:false}}}];});
@@ -1311,7 +1311,7 @@ test('shared: identical tool names retain request schemas, permissions and tool-
  const all=Promise.all(jobs);void all.catch(()=>{});
  try{
   await Promise.race([Promise.all([...parallelRequests.values()].map(p=>p.started.promise)),all.then(()=>{throw new Error('Tools did not overlap');}),delay(60000,undefined,{ref:false}).then(()=>{throw new Error('Tool overlap timed out');})]);
-  assert.equal(instance.shared.entries.size,1);for(const p of parallelRequests.values())p.release.resolve();
+  assert.equal(instance.shared.entries.size,2);for(const p of parallelRequests.values())p.release.resolve();
   const results=await all;
   for(const [i,result] of results.entries()){
    const key=i?'onlyB':'onlyA',call=result.choices[0].message.tool_calls[0];
@@ -1327,7 +1327,7 @@ test('shared: identical tool names retain request schemas, permissions and tool-
 });
 
 test('shared: cancelling after first output preserves other sessions and the shared process', {timeout:90000}, async()=>{
- const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),cancel=new AbortController(),labels=['SHARED_CANCEL_B','SHARED_CANCEL_C'];
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true}),cancel=new AbortController(),labels=['SHARED_CANCEL_B','SHARED_CANCEL_C'];
  pausedStream={started:Promise.withResolvers(),release:Promise.withResolvers()};
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  const cancelled=instance.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:'oc-default',messages:[{role:'user',content:'HOLD_AFTER_FIRST_OUTPUT'}],stream:true}),signal:cancel.signal});
@@ -1350,7 +1350,7 @@ test('shared: cancelling after first output preserves other sessions and the sha
 });
 
 test('shared: local OpenCode providers keep their own authentication and model process groups', {timeout:90000}, async()=>{
- const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true,models:{...options.models,saved:{model:'fixture-api/mock',context:100000,output:1000}}});
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true,models:{...options.models,saved:{model:'fixture-api/mock',context:100000,output:1000}}});
  const authBefore=await readFile(authFile,'utf8'),labels=['SHARED_KEY_A1','SHARED_KEY_B1','SHARED_KEY_A2','SHARED_KEY_B2'],before=requests.length;
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  const jobs=labels.map(async(label,i)=>{const response=await instance.fetch('http://bridge/v1/chat/completions',{method:'POST',body:JSON.stringify({model:i%2?'saved':'oc-default',messages:[{role:'user',content:label}],stream:true})},'gateway-key-is-not-an-upstream-credential');assert.equal(response.status,200,response.status===200?'':await response.text());return response.text();});
@@ -1364,15 +1364,17 @@ test('shared: local OpenCode providers keep their own authentication and model p
  }finally{for(const p of parallelRequests.values())p.release.resolve();await instance.close();await Promise.allSettled(jobs);parallelRequests=undefined;}
 });
 
-test('shared: failed instance teardown quarantines its process until unaffected peers finish', {timeout:90000}, async()=>{
- const instance=new OpenCodeBridge({...options,workerSharing:true,workerReuse:true}),originalFetch=globalThis.fetch;
+test('shared: failed session cleanup quarantines its process until unaffected peers finish', {timeout:90000}, async()=>{
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerSharing:true,workerReuse:true}),originalFetch=globalThis.fetch;
  const labels=['SHARED_CLEANUP_A','SHARED_CLEANUP_B'];let failed=false;
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  globalThis.fetch=async(url,init)=>{
-  if(String(url).endsWith('/instance/dispose')){
-   const directory=decodeURIComponent(new Headers(init.headers).get('x-opencode-directory'));
-   const body=JSON.parse(await readFile(path.join(directory,'.bridge-request.json'),'utf8')).body;
-   if(body.messages.some(m=>m.content===labels[0])){failed=true;throw new Error('Synthetic instance disposal failure');}
+  if(init?.method==='DELETE'&&/\/session\/[^/]+$/.test(new URL(url).pathname)){
+   const sessionID=new URL(url).pathname.split('/').at(-1);
+   for(const entry of instance.shared.all){
+    const body=await readFile(path.join(entry.process.home,'requests',sessionID,'request.json'),'utf8').then(JSON.parse,()=>undefined);
+    if(body?.body.messages.some(m=>m.content===labels[0])){failed=true;throw new Error('Synthetic session deletion failure');}
+   }
   }
   return originalFetch(url,init);
  };
@@ -1391,7 +1393,7 @@ test('shared: failed instance teardown quarantines its process until unaffected 
 });
 
 test('shared: three client protocols and retired configuration generations keep separate live sessions', {timeout:90000}, async()=>{
- const runtime=new ProxyRuntime({file:path.join(home,'shared-generations.json'),settings:{mode:'global',command,discoverModels:false,workerSharing:true,workerReuse:true,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'shared-gateway-fixture',enabled:true}]}});
+ const runtime=new ProxyRuntime({file:path.join(home,'shared-generations.json'),settings:{mode:'global',command,workingDirectory,discoverModels:false,workerSharing:true,workerReuse:true,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'shared-gateway-fixture',enabled:true}]}});
  const protocols=['chat','responses','anthropic'],labels=protocols.map(p=>'SHARED_PROTOCOL_'+p),before=requests.length;
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  let jobs=[];
@@ -1420,7 +1422,7 @@ test('shared: sustained memory comparison uses eight simultaneous real OpenCode 
  if(!refreshes){const login=await request({messages:[{role:'user',content:'MEMORY_LOGIN'}]});assert.equal(login.status,200);await login.json();await bridge.drain();}
  const report={platform:process.platform,concurrentRequests:count,results:[]};
  for(const shared of [false,true]){
-  const instance=new OpenCodeBridge({...options,onFailure:undefined,workerSharing:shared,workerReuse:true,timeoutMs:0,startupTimeoutMs:90000});
+  const instance=new OpenCodeBridge({...options,workingDirectory,onFailure:undefined,workerSharing:shared,workerReuse:true,timeoutMs:0,startupTimeoutMs:90000});
   const labels=Array.from({length:count},(_,i)=>'MEMORY_'+Number(shared)+'_'+i),before=requests.length,beforeWorkers=(await observations()).length,versions=new Set();
   parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
   const jobs=labels.map(async label=>{const response=await request({messages:[{role:'user',content:label}],stream:true},instance);assert.equal(response.status,200,response.status===200?'':await response.text());versions.add(response.headers.get('x-opencode-version'));const text=await response.text();assert.ok(text.includes(label));assert.match(text,/\[DONE\]/);});
@@ -1446,7 +1448,7 @@ test('shared: sustained memory comparison uses eight simultaneous real OpenCode 
 test('shared: packaged server runs concurrent protocol requests through one native OpenCode 1 process', {timeout:90000}, async t=>{
  if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate packaged shared instances.');return;}
  const file=path.join(home,'packaged-shared.json'),beforeWorkers=(await observations()).length,before=requests.length;
- await writeFile(file,JSON.stringify({mode:'global',command,workerSharing:true,workerReuse:true,discoverModels:false,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'packaged-shared-key',enabled:true}]}));
+ await writeFile(file,JSON.stringify({mode:'global',command,workingDirectory,workerSharing:true,workerReuse:true,discoverModels:false,diagnostics:false,host:'127.0.0.1',port:0,models:options.models,modelOverrides:{},apiKeys:[{id:'shared',name:'fixture',key:'packaged-shared-key',enabled:true}]}));
  const labels=['PACKAGED_SHARED_CHAT','PACKAGED_SHARED_RESPONSES','PACKAGED_SHARED_MESSAGES'];
  parallelRequests=new Map(labels.map(label=>[label,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  let child,exited,base,jobs=[];
@@ -1473,7 +1475,7 @@ test('shared: packaged server runs concurrent protocol requests through one nati
 });
 
 test('resources: queued cold starts reuse a worker returned while waiting without starting a spare', {timeout:60000}, async()=>{
- const instance=new OpenCodeBridge({...options,workerReuse:true,maxIdleWorkers:1}),releases=[];
+ const instance=new OpenCodeBridge({...options,workingDirectory,workerReuse:true,maxIdleWorkers:1}),releases=[];
  let clean;
  try{
   await instance.prewarm(['oc-default']);await instance.drain();instance.pauseWarmup();
@@ -1495,7 +1497,7 @@ test('resources: queued cold starts reuse a worker returned while waiting withou
 });
 
 test('resources: a completion burst resets only retained workers and preserves concurrent request isolation', {timeout:90000}, async()=>{
- const reports=[],instance=new OpenCodeBridge({...options,workerReuse:true,maxIdleWorkers:2,onDiagnostics:r=>reports.push(r)}),originalFetch=globalThis.fetch;
+ const reports=[],instance=new OpenCodeBridge({...options,workingDirectory,workerReuse:true,maxIdleWorkers:2,onDiagnostics:r=>reports.push(r)}),originalFetch=globalThis.fetch;
  const count=4,before=requests.length;
  parallelRequests=new Map(Array.from({length:count},(_,i)=>['RESOURCE_ISOLATION_'+i,{started:Promise.withResolvers(),release:Promise.withResolvers()}]));
  let resets=0,tasks=[];
@@ -1516,7 +1518,7 @@ test('resources: a completion burst resets only retained workers and preserves c
 test('managed20: packaged server uses real global OpenCode, aliases, defaults and three protocols without persistent request tracking', {timeout:90000}, async t=>{
   if(!process.env.TEST_PACKAGED_PROXY){t.skip('Set TEST_PACKAGED_PROXY to validate the packaged server.');return;}
   const file=path.join(home,'managed-config.json');
-  await writeFile(file,JSON.stringify({mode:'global',command,workingDirectory,host:'127.0.0.1',port:0,timeoutMs:0,workerReuse:true,diagnostics:false,apiKeys:[{id:'managed-key',name:'测试客户端',key:'fixture-client-access-key',enabled:true}],modelOverrides:{'fixture-api/mock':{alias:'desktop-model',defaults:{temperature:0.4,max_tokens:100}}}}));
+  await writeFile(file,JSON.stringify({mode:'global',command,workingDirectory,workingDirectory,host:'127.0.0.1',port:0,timeoutMs:0,workerReuse:true,diagnostics:false,apiKeys:[{id:'managed-key',name:'测试客户端',key:'fixture-client-access-key',enabled:true}],modelOverrides:{'fixture-api/mock':{alias:'desktop-model',defaults:{temperature:0.4,max_tokens:100}}}}));
   let child,exited,base;
   const launch=async()=>{
     child=spawn(process.env.TEST_PACKAGED_PROXY,['--config',file,'--admin-port','0'],{env:{...process.env,OPENCODE_PROXY_ADMIN_KEY:'fixture-admin-access-key'},windowsHide:true,stdio:['ignore','pipe','pipe']});

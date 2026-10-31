@@ -13,10 +13,10 @@ export function normalize(p,j){
  if(p==='responses')return{text:(j.output??[]).filter(x=>x.type==='message').flatMap(x=>x.content??[]).map(x=>x.text??'').join(''),reasoning:(j.output??[]).filter(x=>x.type==='reasoning').flatMap(x=>x.summary??[]).map(x=>x.text??'').join(''),calls:(j.output??[]).filter(x=>x.type==='function_call').map(x=>({id:x.call_id,name:x.name,args:JSON.parse(x.arguments)})),finish:j.status,usage:j.usage,raw:j};
  return{text:(j.content??[]).filter(x=>x.type==='text').map(x=>x.text).join(''),reasoning:(j.content??[]).filter(x=>x.type==='thinking').map(x=>x.thinking).join(''),calls:(j.content??[]).filter(x=>x.type==='tool_use').map(x=>({id:x.id,name:x.name,args:x.input})),finish:j.stop_reason,usage:j.usage,raw:j};
 }
-export async function request(p,b,{cancel=false,timeout=150000,onOutput}={}){
+export async function request(p,b,{cancel=false,timeout=150000,onOutput,signal}={}){
  const started=Date.now(),controller=new AbortController(),timer=setTimeout(()=>controller.abort(new Error('live-request-timeout')),timeout);let response,streamReader,events=[],firstOutputMs=null,firstTextMs=null,headersMs,firstByteMs=null,lastOutputMs=null,terminalMs=null,textDeltas=0,reasoningDeltas=0;
  try{
- response=await fetch(s.endpoint+routes[p],{method:'POST',headers:{'content-type':'application/json',...(p==='anthropic'?{'x-api-key':s.key,'anthropic-version':'2023-06-01'}:{authorization:'Bearer '+s.key})},body:JSON.stringify(b),signal:controller.signal});
+ response=await fetch(s.endpoint+routes[p],{method:'POST',headers:{'content-type':'application/json',...(p==='anthropic'?{'x-api-key':s.key,'anthropic-version':'2023-06-01'}:{authorization:'Bearer '+s.key})},body:JSON.stringify(b),signal:signal?AbortSignal.any([controller.signal,signal]):controller.signal});
  headersMs=Date.now()-started;const version=response.headers.get('x-opencode-version'),requestId=response.headers.get('x-opencode-request-id'),reused=response.headers.get('x-opencode-worker-reused'),serverTiming=response.headers.get('server-timing');
  if(!response.ok){const error=await response.text();throw Object.assign(new Error('HTTP '+response.status+': '+error),{status:response.status});}
  if(!b.stream){const j=await response.json();if(j.error)throw Error(JSON.stringify(j.error));return{...normalize(p,j),ms:Date.now()-started,version,requestId,status:response.status};}

@@ -35,7 +35,7 @@ test('retired upstream channels are backed up locally before removal and cannot 
   assert.ok(!(await readFile(file,'utf8')).includes('retired-fixture-secret'));
   await readSettings(file);assert.deepEqual((await readdir(directory)).sort(),files.sort());
   assert.throws(()=>validateSettings({...settings,channels:[]},directory),/未知配置字段/);
-  assert.equal(settings.workerSharing,false);assert.equal(validateSettings({...settings,workerSharing:true},directory).settings.workerSharing,true);
+  assert.equal(settings.workerSharing,false);assert.throws(()=>validateSettings({...settings,workerSharing:true},directory),/真实工作目录/);assert.equal(validateSettings({...settings,workingDirectory:directory,workerSharing:true},directory).settings.workerSharing,true);
  }finally{await rm(directory,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });
 

@@ -46,7 +46,7 @@ Cherry Studio 等客户端填写 API 地址与访问 Key，再刷新模型列表
 不再采集持久化统计、不将提示词、工具参数及原始请求/响应保存为请求日志；不读取、不删除旧统计文件或请求记录。管理界面不提供统计、请求日志或有效请求视图。响应中真实 usage 仍转发。必要的进程错误和可选诊断仍可输出到终端；Windows 桌面端将服务的标准错误输出写入配置目录下的 `desktop.log`，用于启动与运行故障排查。
 
 - 默认模式不限制 OpenCode 版本，兼容性由其公开 API/hooks 决定；可选共享模式要求兼容的 OpenCode 1，目前通过本机 1.18.0 验证。
-- 默认不限请求并发，采用每个请求独占进程、会话和数据库的隔离方式。可在“网络与超时”开启低内存并发（`workerSharing: true`）：同模型、同配置的请求共享本机 OpenCode 1 进程，分别使用独立实例、会话和工具配置；数据库在同组进程内共享。共享模式默认关闭，隔离、工作目录及故障边界见[共享进程说明](docs/shared-processes.md)。
+- 默认不限请求并发，采用每个请求独占进程、会话和数据库的隔离方式。可在“网络与超时”开启低内存并发（`workerSharing: true`）：必须配置真实工作目录，同目录、模型、配置和工具契约的请求共享本机 OpenCode 1 进程及实例，各请求使用独立会话、历史和参数。同名不同 schema 的工具分组隔离，数据库在组内共享。共享模式默认关闭，隔离、工作目录及故障边界见[共享进程说明](docs/shared-processes.md)。
 - 网关启动后异步进行无推理预热，默认保留最多两个最近使用模型的热进程；`warmupModels` 可指定初始预热模型，否则选择已启用模型。热进程保持到停止网关，其他空闲进程默认 60 秒退出；全部空闲进程仍受 `maxIdleWorkers` 限制。冷启动最多同时初始化两个进程，不限制已初始化请求的推理并发。
 - 供应商、登录与认证插件由全局 OpenCode 管理。客户端系统提示与历史通过公开 hooks 替换默认代理提示；认证插件的参数、请求头及 fetch 逻辑仍可能运行。
 - 禁止执行本地内置工具，function tools 由客户端执行。原生工具 ID/名称在 OpenCode 宣告时先返回，参数在完整 JSON 后返回，没有逐字符工具参数 delta。内联图片、PDF 和音频需要模型声明对应输入能力；不支持 embeddings、远程附件 URL 或文件 ID，详见 [协议说明](docs/protocols.md)。
@@ -72,7 +72,7 @@ GitHub 构建 Windows/Linux，检查前端语法、单元测试、Windows 托盘
 
 真实供应商回归使用 `npm run test:live`，需要设置 `OPENCODE_PROXY_LIVE_URL`（网关的 /v1 基址）和 `OPENCODE_PROXY_LIVE_KEY`（网关访问 Key）。`OPENCODE_PROXY_LIVE_MODELS` 为逗号分隔的短模型名，默认测试 deepseek-flash、deepseek-v4-pro；`OPENCODE_PROXY_LIVE_CONCURRENCY` 默认 12。脚本只向网关发起推理请求，结果默认写入系统临时目录。可用 `-- --pressure-only` 单独重跑压力场景。
 
-`npm run test:live:shared` 专门验证本机 OpenCode 1 共享进程，固定只允许已配置的 `deepseek-flash`。读取本机代理配置并启动独立临时网关，沿用全局 OpenCode 认证，不修改现有配置。覆盖三个协议的三轮对话、两轮工具调用、流式中文/Emoji、历史续接、并发工具隔离、取消及真实连接/进程中断恢复，并比较冷进程、预热和复用首字耗时。该命令调用真实模型，报告仅写系统临时目录，不在 CI 运行；可通过 `OPENCODE_PROXY_LIVE_FILTER` 正则选择用例。结果与边界见[共享模式真实模型验证](docs/validation/2026-10-28-shared-live.md)。
+`npm run test:live:shared` 专门验证本机 OpenCode 1 共享进程，固定只允许已配置的 `deepseek-flash`。读取本机代理配置并启动独立临时网关，沿用全局 OpenCode 认证，不修改现有配置。覆盖真实目录及相对文件、多轮对话和工具结果、流式中文/Emoji、历史续接、工具契约分组、取消、清理失败及真实连接/进程中断恢复，并比较冷进程、预热和复用首字耗时。该命令调用真实模型，报告仅写系统临时目录，不在 CI 运行；可通过 `OPENCODE_PROXY_LIVE_FILTER` 正则选择用例。设置 `OPENCODE_PROXY_LIVE_MEMORY_CONCURRENCY=4` 可额外比较真实模型持续并发内存（允许 2–8）。结果与边界见[真实目录整改验证](docs/validation/2026-10-31-shared-working-directory.md)；[初版验证](docs/validation/2026-10-28-shared-live.md)保留为历史记录。
 
 `npm run test:live:advanced` 使用 `TEST_OPENCODE_COMMAND`（JSON 命令数组）和 `TEST_DSH_ROOT`（已安装的 `@deepseek-ai/dsh` 包目录），自动启动临时网关并验证三个协议、两个 DeepSeek 模型、Responses namespace/custom 工具、官方 OpenAI SDK、DSH 原生 Messages 适配器、图片工具结果、思考开关、并发和中断恢复。DSH 文件索引和报告均在临时目录，不修改客户端配置；所有推理仍由全局 OpenCode 使用已有认证完成。该测试会调用真实模型，不在 CI 中运行。Flash 验证真实图片理解；文本模型 Pro 验证图片请求明确拒绝。
 
