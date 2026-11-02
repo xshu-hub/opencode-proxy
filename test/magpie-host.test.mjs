@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executableCommand } from '../lib/command.mjs';
 import { globalProfile } from './global-profile.mjs';
+import { nativeToolName } from '../lib/protocol.mjs';
 
 if (!process.env.TEST_MAGPIE_HOST) throw new Error('Set TEST_MAGPIE_HOST to Magpie internal/plugin/host.js.');
 const source = path.resolve(process.env.TEST_MAGPIE_HOST);
@@ -16,7 +17,15 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 test('the real Magpie Bun host loads the package, lists models and streams real OpenCode inference', { timeout: 120000 }, async t => {
   const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND ?? '["opencode"]');
   const bun = await executableCommand(JSON.parse(process.env.TEST_BUN_COMMAND ?? '["bun"]'));
-  const profile = await globalProfile();
+  const profile = await globalProfile({ toolFailure: 'Fixture host tool rejection', respond: async ({ body, res }) => {
+    const tool = body.tools?.find(t => t.function.name === nativeToolName('lookup'));
+    if (!tool) return false;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end('data: ' + JSON.stringify({ id: 'host-error', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'bad-host-tool', type: 'function', function: {
+      name: tool.function.name, arguments: '{"city":"test"}',
+    } }] }, finish_reason: 'tool_calls' }] }) + '\n\ndata: [DONE]\n\n');
+    return true;
+  } });
   const child = spawn(bun[0], [...bun.slice(1), source], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env }, cwd: profile.home });
   let stderr = '', sequence = 0;
   const pending = new Map();
@@ -62,7 +71,7 @@ test('the real Magpie Bun host loads the package, lists models and streams real 
   });
   const init = await rpc('init', {
     authPath: path.join(profile.home, 'magpie-auth.json'), directory: profile.home,
-    plugins: [{ spec: root, target: root, options: { command, startupTimeoutMs: 15000, firstOutputTimeoutMs: 20000 } }],
+    plugins: [{ spec: root, target: root, options: { command, logDirectory: path.join(profile.home, 'diagnostics'), startupTimeoutMs: 15000, firstOutputTimeoutMs: 20000 } }],
   });
   assert.equal(init.result.plugins.length, 1);
   assert.equal(init.result.plugins[0].error, undefined, JSON.stringify(init.result));
@@ -90,4 +99,15 @@ test('the real Magpie Bun host loads the package, lists models and streams real 
   assert.equal(profile.requests[0].authorization, 'Bearer fixture-renewed');
   assert.equal(profile.requests[0].marker, 'real-plugin');
   assert.equal(await readFile(profile.configPath, 'utf8'), profile.original);
+  const failed = await rpc('fetch', {
+    provider: 'opencode-proxy', model: 'mock', npm: '@ai-sdk/openai-compatible',
+    url: loaded.baseURL + '/chat/completions', method: 'POST',
+    body: Buffer.from(JSON.stringify({ model: 'mock', messages: [{ role: 'user', content: 'call lookup' }], stream: true,
+      tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }],
+    })).toString('base64'),
+  });
+  const errorText = Buffer.concat(failed.frames.filter(f => f.event === 'chunk').map(f => Buffer.from(f.data, 'base64'))).toString('utf8');
+  assert.match(errorText, /opencode_tool_error/); assert.match(errorText, /Fixture host tool rejection/);
+  const records = (await readFile(path.join(profile.home, 'diagnostics', 'diagnostics.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(records.at(-1).tool.name, 'lookup'); assert.equal(records.at(-1).error.code, 'opencode_tool_error');
 });

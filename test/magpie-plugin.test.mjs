@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
+import path from 'node:path';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createPlugin } from '../lib/magpie-plugin.mjs';
 import { ApiError } from '../lib/protocol.mjs';
 
@@ -16,7 +18,7 @@ async function fixture(t, { options, catalog = { coder: model, 'oc-default': { c
     async fetch(...args) { calls.push({ request: args }); if (this.error) throw this.error; return this.response ?? Response.json({ choices: [{ message: { content: 'hello' } }] }); }
     async close() { this.closed = (this.closed ?? 0) + 1; }
   }
-  const hooks = await createPlugin(Bridge)({ directory: os.tmpdir(), magpie: {} }, options);
+  const hooks = await createPlugin(Bridge)({ directory: os.tmpdir(), magpie: {} }, { diagnostics: false, ...options });
   t.after(() => hooks.dispose());
   return { hooks, calls, instances, list: () => hooks.provider.models({ models: {} }, { auth }), loader: () => hooks.auth.loader(async () => auth) };
 }
@@ -52,6 +54,23 @@ test('saved headerHooks settings migrate to the complete official Session reques
     assert.equal(f.instances[0].config.headerHooks, undefined);
     assert.equal(f.instances[0].config.mode, 'global');
   }
+});
+
+test('plugin diagnostics persist discovery and request failures with safe context', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'plugin-diag-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const f = await fixture(t, { options: { diagnostics: true, logDirectory: directory } });
+  await f.list(); const bridge = f.instances[0];
+  bridge.listError = Object.assign(new Error('Executable unavailable'), { code: 'ENOENT' });
+  await assert.rejects(f.list(), /Executable unavailable/);
+  await bridge.config.onFailure({ phase: 'inference', requestId: 'req-1', sessionId: 'ses-1', version: 'custom-1.16.2', error: new ApiError('tool validation failed', 502, null, 'opencode_tool_error'), output: 'PRIVATE_CHILD_OUTPUT' });
+  await f.hooks.dispose();
+  const raw = await readFile(path.join(directory, 'diagnostics.jsonl'), 'utf8');
+  const records = raw.trim().split('\n').map(JSON.parse);
+  assert.equal(records[0].event, 'catalog_failed'); assert.equal(records[0].error.code, 'ENOENT');
+  assert.equal(records[1].requestId, 'req-1'); assert.equal(records[1].openCodeVersion, 'custom-1.16.2');
+  assert.doesNotMatch(raw, /PRIVATE_CHILD_OUTPUT/);
+  for (const options of [{ diagnostics: 'yes' }, { logDirectory: '' }, { logDirectory: null }]) await assert.rejects(createPlugin()({ directory, magpie: {} }, options), /diagnostics|logDirectory/);
 });
 
 test('model discovery publishes capabilities and short ids, never backend credentials or recursive routes', async t => {

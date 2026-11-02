@@ -53,6 +53,8 @@ magpie plugin login opencode-proxy
 | `firstOutputTimeoutMs` | 模型首个输出事件的等待时限，默认 `120000` 毫秒。 |
 | `idleTimeoutMs` | 模型后续输出事件间隔时限，默认 `180000` 毫秒。 |
 | `timeoutMs` | 总请求时限，默认 `0`，表示不设总时限。 |
+| `diagnostics` | 错误诊断日志，默认 `true`；设为 `false` 关闭文件日志及对应 stderr 提示。 |
+| `logDirectory` | 自定义诊断目录；相对路径以 Magpie 提供的目录为基准。省略时使用下方系统默认目录。 |
 
 默认推理并发不限，由 Magpie 控制接入并发。共享模式按运行配置和完整工具合约分组，同组请求使用独立 Session 并共享进程；模型和供应商不额外拆分进程。不同工具 schema、权限或运行配置仍可能产生多个进程，不是全局单进程模式。独占模式为活动请求分配独立工作进程，完成清理后复用。
 
@@ -83,6 +85,24 @@ magpie plugin login opencode-proxy
 插件收到 OpenCode 的推理重试事件时中止该请求并返回错误，由调用方决定是否重试。已输出部分内容的请求不重放；额度或速率限制按 429 返回，公开的上游错误原因和有效 `Retry-After` 会保留。
 
 Session、数据库、SDK 和桥接 MCP 都有运行开销，不能视为零 Session 或零 OpenCode 开销。客户端历史会参与 Session 桥接，运行数据存放在临时工作区；插件不提供持久化请求日志、用量统计、账号余额或供应商价格查询。
+
+## 排错日志
+
+记录模型发现、请求准备和推理阶段的运行错误，不逐条记录正常请求或输入校验失败。日志为 `diagnostics.jsonl`，超过 2 MiB 时轮换为 `diagnostics.jsonl.1`，保留一个备份。异步写入队列最多 32 条，拥塞时丢弃额外诊断并在后续记录中计数；不限制推理并发。写入失败时仅在 stderr 提示，不替换原始请求错误。
+
+- Ubuntu/Linux：`${XDG_STATE_HOME:-$HOME/.local/state}/opencode-proxy/logs/`。
+- Windows：`%LOCALAPPDATA%/opencode-proxy/logs/`。
+- 目录属于实际运行 Magpie 的用户；可通过 `logDirectory` 指定绝对路径。
+
+工具错误会携带工具名和经过脱敏、截断的 OpenCode 原因。文件还记录时间、请求 ID、Session ID、模型、请求阶段、OpenCode/Node 版本、平台、工具调用 ID 和最近 50 个事件的类型与状态。不保存请求正文、工具参数、完整子进程输出或 HTTP 请求头；错误文本中的常见凭证、URL、回显载荷及当前请求已知文本会脱敏。任意第三方错误文本仍应在对外分享前检查。
+
+Ubuntu 查看最近日志：
+
+```sh
+tail -n 20 "${XDG_STATE_HOME:-$HOME/.local/state}/opencode-proxy/logs/diagnostics.jsonl"
+```
+
+以响应头 `x-opencode-request-id` 或 stderr 中的请求 ID 对照文件记录。模型发现失败时还未创建推理请求，因此可能没有请求 ID 或 OpenCode 版本；启动失败时版本也可能为空。
 
 ## 开发与测试
 

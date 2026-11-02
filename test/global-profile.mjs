@@ -8,7 +8,7 @@ import { createHmac } from 'node:crypto';
 
 // Only disposable credentials and a loopback upstream. Never read or copy the
 // user's OpenCode configuration, auth store or Magpie sign-ins into a test.
-export async function globalProfile({ respond, multipleModels = false, resourceMetrics = false } = {}) {
+export async function globalProfile({ respond, multipleModels = false, resourceMetrics = false, toolFailure } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-magpie-test-'));
   const configDir = path.join(home, 'config', 'opencode');
   const authFile = path.join(home, 'data', 'opencode', 'auth.json');
@@ -87,6 +87,7 @@ export async function globalProfile({ respond, multipleModels = false, resourceM
         output.headers.cookie = 'fixture-session=valid';
       },
       auth: authentication(client, 'fixture'),
+      ...(${JSON.stringify(toolFailure ?? '')} ? { 'tool.execute.before': async () => { throw new Error(${JSON.stringify(toolFailure ?? '')}); } } : {}),
     };
   };
   export const SecondaryAuth = async ({ client }) => ${JSON.stringify(multipleModels)} ? { auth: authentication(client, 'fixture-secondary') } : {};\n`);
