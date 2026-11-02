@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { executableCommand } from '../lib/command.mjs';
-import { OpenCodeTransport } from '../lib/transport.mjs';
+import { OpenCodeBridge } from '../lib/bridge.mjs';
 
 const reportedShim = '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@opencode\\opencode-ai\\bin\\opencode.exe"   %*\r\n';
 
@@ -66,7 +66,7 @@ test('native executables and non-Windows command arrays retain their selection',
 });
 
 test('model discovery failure exposes the actual OpenCode startup error', async () => fixture(async ({ bin }) => {
-  const bridge = new OpenCodeTransport({command:[path.join(bin,'missing-opencode.exe')],startupTimeoutMs:500});
+  const bridge = new OpenCodeBridge({mode:'global',command:[path.join(bin,'missing-opencode.exe')],startupTimeoutMs:500,diagnostics:false});
   try {
     await assert.rejects(bridge.loadModels(), error => error.status === 503 && /OpenCode/.test(error.message));
   } finally { await bridge.close(); }

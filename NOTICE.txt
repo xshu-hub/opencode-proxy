@@ -7,7 +7,5 @@ Since 0.9.0 this package is a Magpie provider plugin. It does not bundle the
 Magpie application, a standalone gateway, or a desktop/frontend application.
 Inference runs through the user's real global OpenCode program.
 
-Since 0.10.0 the session inference bridge, MCP bridge, worker pools and protocol
-converters have been removed. Its bundled helper is loaded as a plugin by the
-real OpenCode executable. The runtime HTTP client is Undici (MIT); its license
-is included in docs/third-party-licenses.txt.
+JSON Schema validation uses Ajv, ajv-formats and their runtime dependencies.
+Their license texts are included in docs/third-party-licenses.txt.

@@ -78,7 +78,3 @@ jobs:
           curl -fL https://raw.githubusercontent.com/yetone/magpie/18c3976234b322e68a52cf092b1ea4ebffc23b38/internal/plugin/host.js -o bridge-runtime/magpie-host.js
           node -e 'const fs=require("fs"),path=require("path");fs.appendFileSync(process.env.GITHUB_ENV,"TEST_MAGPIE_HOST="+path.resolve("bridge-runtime/magpie-host.js")+"\n")'
       - run: npm run test:magpie-host
-      - name: Verify per-request header hooks in the real Magpie host
-        run: npm run test:magpie-host
-        env:
-          TEST_HEADER_HOOKS: per-request

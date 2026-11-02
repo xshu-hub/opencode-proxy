@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { modelCatalog } from '../lib/models.mjs';
 import { workerConfig } from '../lib/config.mjs';
+import { normalizeConfig } from '../lib/bridge.mjs';
+import { toolPermissions, nativeToolName } from '../lib/protocol.mjs';
 
 test('short model IDs preserve exact upstream routes, collision safety and explicit aliases',()=>{
   const entries=['xshu/gpt-6.1-sol','a/shared','b/shared','a/b/nested','b/nested','x/oc-default','x/constructor','x/__proto__'];
@@ -25,7 +27,9 @@ test('short model IDs preserve exact upstream routes, collision safety and expli
   const custom=modelCatalog(discovered,{'gpt-6.1-sol':{model:'a/shared',context:100,output:10}});
   assert.equal(custom.models['gpt-6.1-sol'].model,'a/shared');
   assert.equal(custom.accepted['xshu/gpt-6.1-sol'].model,'xshu/gpt-6.1-sol');
+  assert.throws(()=>normalizeConfig({mode:'global',modelIdStyle:'bad'}),/modelIdStyle/);
 });
+
 test('inline OpenCode JSONC retains providers/plugins/options without weakening worker overrides',()=>{
   const overrides={permission:{'*':'deny'},plugin:['file:///worker.mjs'],mcp:{bridge:{enabled:true}},agent:{bridge:{mode:'primary'}}};
   const source='{ // comment\n "provider":{"x":{"options":{"baseURL":"http://example.invalid/v1","marker":"a,} // /*","escaped":"quote\\\""}}}, "plugin":["file:///global.mjs",], /* block */ "mcp":{"old":{"enabled":true}}, "permission":{"*":"allow"}, "agent":{"custom":{}},}';
@@ -37,4 +41,11 @@ test('inline OpenCode JSONC retains providers/plugins/options without weakening 
   assert.ok(config.mcp.old); assert.ok(config.mcp.bridge); assert.ok(config.agent.custom);
   assert.deepEqual(workerConfig('',overrides),overrides);
   for(const invalid of ['null','[]','{','{/*','{"plugin":true}','{"provider":1,,}']) assert.throws(()=>workerConfig(invalid,overrides),e=>e.code==='opencode_config');
+});
+
+test('tool permissions allow only exact registered client names and none disables every tool',()=>{
+  const body={tools:[{type:'function',function:{name:'weather'}},{type:'function',function:{name:'clock'}}]};
+  assert.deepEqual(toolPermissions(body),{'*':'deny',[nativeToolName('weather')]:'allow',[nativeToolName('clock')]:'allow'});
+  assert.deepEqual(toolPermissions({...body,tool_choice:'none'}),{'*':'deny'});
+  assert.deepEqual(toolPermissions({}),{'*':'deny'});
 });

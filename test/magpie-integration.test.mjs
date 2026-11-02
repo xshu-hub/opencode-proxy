@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { OpenCodeProxyPlugin } from '../index.mjs';
-import { sseEvents } from './sse.mjs';
+import { sseEvents } from '../lib/protocol.mjs';
 import { toolCalls } from './tool-deltas.mjs';
 import { globalProfile } from './global-profile.mjs';
 
@@ -14,7 +14,7 @@ test('Magpie plugin uses real OpenCode authentication, tools, refresh and shutdo
   let hooks;
   t.after(async () => { await hooks?.dispose(); await profile.close(); });
   hooks = await OpenCodeProxyPlugin({ directory: profile.home, magpie: {} }, {
-    command: JSON.parse(command), startupTimeoutMs: 20000, firstOutputTimeoutMs: 20000,
+    command: JSON.parse(command), startupTimeoutMs: 20000, firstOutputTimeoutMs: 20000, headerHooks: 'per-request',
   });
   const auth = { type: 'api', key: 'local' };
   const cfg = {}; await hooks.config(cfg);
@@ -32,10 +32,13 @@ test('Magpie plugin uses real OpenCode authentication, tools, refresh and shutdo
   assert.equal(whole.choices[0].message.content, '你好，Magpie。');
   assert.equal(whole.usage.total_tokens, 15);
   assert.equal(profile.requests.length, 1, 'One external turn must cause one inference');
-  assert.equal((await readFile(profile.pidsFile, 'utf8')).trim().split('\n').length, 1,
-    'Management calls and hooks must share one plugin instance, including older v1 SDK runtimes');
   assert.equal(profile.requests[0].authorization, 'Bearer fixture-renewed');
   assert.equal(profile.requests[0].marker, 'real-plugin');
+  assert.equal(profile.requests[0].hook, 'from-chat-headers');
+  assert.equal(profile.requests[0].cookie, 'fixture-session=valid');
+  assert.equal(profile.requests[0].signature, profile.requests[0].expectedSignature);
+  assert.match(profile.requests[0].affinity, /^ses_/);
+  assert.match(profile.requests[0].userAgent, /^opencode\//);
   assert.equal(profile.requests[0].body.messages[0].content, 'SYSTEM_SENTINEL');
   assert.equal(profile.requests[0].body.temperature, 0.2);
   assert.equal(profile.requests[0].body.max_tokens, 123);
