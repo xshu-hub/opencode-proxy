@@ -1,4 +1,4 @@
-name: OpenCode Proxy build
+name: Magpie OpenCode plugin
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       compatibility:
-        description: Run real OpenCode integration tests on Windows/Linux
+        description: Run real OpenCode tests with disposable profiles and mock upstreams
         type: boolean
         default: false
 
@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  plugin:
     strategy:
       fail-fast: false
       matrix:
@@ -35,65 +35,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-      - uses: actions/setup-go@v5
-        if: runner.os == 'Windows'
-        with:
-          go-version: '1.25.x'
-          cache: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
-      - run: npm run build:ui
+      - run: npm run check
       - run: npm test
-      - name: Verify native Windows tray
-        if: runner.os == 'Windows'
-        run: go test desktop/tray_windows.go desktop/tray_windows_test.go
-      - name: Build standalone client and server
-        run: node scripts/package.mjs $PLATFORM
-        env:
-          PLATFORM: ${{ runner.os == 'Windows' && 'windows' || 'linux' }}
-      - name: Install real OpenCode for packaged runtime verification
-        run: |
-          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35 @opencode-ai/plugin@1.18.35
-          node -e 'const fs=require("fs"),path=require("path");const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json"));const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode);fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\nTEST_PACKAGED_PROXY="+path.resolve("dist",process.platform==="win32"?"windows/opencode-proxy-server.exe":"linux/opencode-proxy-server")+"\n")'
-      - name: Verify packaged server and hot worker lifecycle through real OpenCode
-        run: node --test --test-name-pattern='managed20:|hotpath:|shared:' test/global.test.mjs
-      - name: Archive standalone application
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            powershell -NoProfile -Command 'Compress-Archive -Path dist/windows/* -DestinationPath dist/opencode-proxy-0.8.0-windows-x64.zip'
-          else
-            tar -czf dist/opencode-proxy-0.8.0-linux-x64.tar.gz -C dist/linux .
-          fi
+      - run: npm pack
       - uses: actions/upload-artifact@v4
         with:
-          name: opencode-proxy-${{ runner.os }}
-          path: |
-            dist/*.zip
-            dist/*.tar.gz
+          name: opencode-proxy-plugin-${{ runner.os }}
+          path: '*.tgz'
           if-no-files-found: error
-          retention-days: 30
+
   compatibility:
     if: github.event_name == 'workflow_dispatch' && inputs.compatibility
-    needs: build
+    needs: plugin
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x64
-            opencode: 1.18.35
-          - os: windows-latest
-            platform: windows-x64
-            opencode: 1.18.35
-          - os: ubuntu-latest
-            platform: linux-x64
-            opencode: 1.16.2
-          - os: windows-latest
-            platform: windows-x64
-            opencode: 1.16.2
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     defaults:
@@ -105,14 +63,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
-      - name: Install bridge dependencies and the compatibility-test runtime
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install a disposable OpenCode test runtime
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@${{ matrix.opencode }} @opencode-ai/plugin@${{ matrix.opencode }}
-          node -e 'const fs=require("fs"),path=require("path"); const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json")); const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode); fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\nTEST_OPENCODE_VERSION="+pkg.version+"\n")'
-      - name: Unit and real OpenCode tests
+          npm install --prefix bridge-runtime --no-audit --no-fund opencode-ai@1.18.35 @opencode-ai/plugin@1.18.35
+          node -e 'const fs=require("fs"),path=require("path");const root=path.resolve("bridge-runtime/node_modules/opencode-ai"),pkg=require(path.join(root,"package.json"));const bin=path.resolve(root,typeof pkg.bin==="string"?pkg.bin:pkg.bin.opencode);fs.appendFileSync(process.env.GITHUB_ENV,"TEST_OPENCODE_COMMAND="+JSON.stringify([bin])+"\nTEST_OPENCODE_PLUGIN_DIR="+path.resolve("bridge-runtime/node_modules/@opencode-ai/plugin")+"\n")'
+      - run: npm run test:integration
+      - name: Verify the Magpie plugin host with disposable authentication
         run: |
-          npm test
-          npm run test:integration
-
+          curl -fL https://raw.githubusercontent.com/yetone/magpie/18c3976234b322e68a52cf092b1ea4ebffc23b38/internal/plugin/host.js -o bridge-runtime/magpie-host.js
+          node -e 'const fs=require("fs"),path=require("path");fs.appendFileSync(process.env.GITHUB_ENV,"TEST_MAGPIE_HOST="+path.resolve("bridge-runtime/magpie-host.js")+"\n")'
+      - run: npm run test:magpie-host

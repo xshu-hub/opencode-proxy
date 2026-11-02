@@ -47,9 +47,9 @@ test('missing directories and file paths fail before OpenCode starts and cleanup
       assert.equal(await readFile(sentinel, 'utf8'), 'user-owned');
       await assert.rejects(() => stat(temporary), { code: 'ENOENT' });
       const catalog = new OpenCodeBridge({ mode: 'global', workingDirectory, command: [path.join(directory, 'missing-opencode.exe')] });
-      const listing = await catalog.fetch('http://bridge/v1/models');
-      assert.equal(listing.status, 503);
-      assert.equal((await listing.json()).error.code, 'opencode_working_directory');
+      try {
+        await assert.rejects(catalog.loadModels(), { code: 'opencode_working_directory', status: 503 });
+      } finally { await catalog.close(); }
       assert.equal(await readFile(sentinel, 'utf8'), 'user-owned');
     }
   } finally { await rm(directory, { recursive: true, force: true }); }

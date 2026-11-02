@@ -2,8 +2,10 @@ OpenCode Proxy derives from the OpenCode bridge core at
 https://github.com/xshu-hub/magpie/tree/210234a5f33e0f2643f82b4337e249cf0fe81371/addons/opencode-bridge
 Original bridge version: 0.13.0.
 Retains the original MIT license and copyright notice.
-This repository contains no Magpie backend application or plugin adapter.
 
-Since 0.8.0 the frontend is independently implemented with native ES modules and CSS. It does not ship Magpie frontend code or assets. The visual research references are Tabler (https://github.com/tabler/tabler) and Flowbite Admin Dashboard (https://github.com/themesberg/flowbite-admin-dashboard); no template, framework or library from those projects is bundled. Frontend structure and scope are documented in docs/frontend-port.md. The original Magpie MIT notice remains for the bridge core.
+Since 0.9.0 this package is a Magpie provider plugin. It does not bundle the
+Magpie application, a standalone gateway, or a desktop/frontend application.
+Inference runs through the user's real global OpenCode program.
 
-JSON Schema validation bundles Ajv, ajv-formats and their runtime dependencies. Their license texts are included in docs/third-party-licenses.txt.
+JSON Schema validation uses Ajv, ajv-formats and their runtime dependencies.
+Their license texts are included in docs/third-party-licenses.txt.

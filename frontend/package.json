@@ -1,9 +1,0 @@
-{
-  "name": "opencode-proxy-ui",
-  "private": true,
-  "version": "0.8.0",
-  "type": "module",
-  "scripts": {
-    "build": "node ../scripts/build-ui.mjs"
-  }
-}

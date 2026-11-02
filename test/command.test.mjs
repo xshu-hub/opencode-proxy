@@ -68,8 +68,6 @@ test('native executables and non-Windows command arrays retain their selection',
 test('model discovery failure exposes the actual OpenCode startup error', async () => fixture(async ({ bin }) => {
   const bridge = new OpenCodeBridge({mode:'global',command:[path.join(bin,'missing-opencode.exe')],startupTimeoutMs:500,diagnostics:false});
   try {
-    const response=await bridge.fetch('http://proxy/v1/models',{method:'GET'});
-    assert.equal(response.status,503);
-    assert.match((await response.json()).error.message,/OpenCode/);
+    await assert.rejects(bridge.loadModels(), error => error.status === 503 && /OpenCode/.test(error.message));
   } finally { await bridge.close(); }
 }));
