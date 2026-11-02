@@ -6,6 +6,7 @@ import { BridgeWorker } from '../lib/worker-plugin.mjs';
 import { nativeToolName,toNativeHistory } from '../lib/protocol.mjs';
 import { sharedContract } from '../lib/shared-contract.mjs';
 import { normalizeConfig } from '../lib/bridge.mjs';
+import { OpenCodeBridge } from '../lib/bridge.mjs';
 import { mkdtemp,mkdir,writeFile,readFile,readdir,rm,realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +14,19 @@ import { randomUUID } from 'node:crypto';
 
 const config={workerReuse:true,maxIdleWorkers:2,workerIdleMs:10000};
 const fake=dispose=>({worker:{child:{exitCode:null}},dispose});
+
+test('global defaults share runtime state across models, with separate tool contracts and config generations', async () => {
+ const a={model:'one/a',context:10000,output:1000},b={model:'two/b',context:20000,output:2000};
+ const bridge=new OpenCodeBridge({mode:'global',discoverModels:false,models:{a,b}});
+ try{
+  assert.equal(bridge.config.workerSharing,true);assert.equal(bridge.config.workingDirectory,os.homedir());
+  const body={tools:[]},before=bridge.sharedKey(a,body);
+  assert.equal(before,bridge.sharedKey(b,body));
+  assert.notEqual(before,bridge.sharedKey(b,{tools:[{type:'function',function:{name:'lookup'}}]}));
+  bridge.catalogGeneration++;assert.notEqual(before,bridge.sharedKey(a,body));
+  bridge.replenish=async()=>{};await bridge.prewarm(['a','b']);assert.equal(bridge.warmTargets.length,1);
+ }finally{await bridge.close();}
+});
 test('shared startup is deduplicated and cancelling its first waiter preserves other requests',async()=>{
  const pool=new SharedProcesses(config),ready=Promise.withResolvers(),cancel=new AbortController();let creates=0,disposed=0;
  const create=async()=>{creates++;await ready.promise;return fake(async()=>{disposed++;});};
@@ -85,7 +99,7 @@ test('shared contracts isolate complete tool schemas and permissions but exclude
  const reordered={tools:[{function:{parameters:{required:['city'],properties:{city:{type:'string'}},type:'object'},strict:true,name:'lookup'},type:'function'}]};
  assert.equal(sharedContract(a).hash,sharedContract(reordered).hash);
  assert.ok(!JSON.stringify(sharedContract(a)).includes('PRIVATE_A'));
- assert.throws(()=>normalizeConfig({mode:'global',workerSharing:true}),/真实工作目录/);
+ assert.equal(normalizeConfig({mode:'global',workerSharing:true}).workingDirectory,os.homedir());
  const history=toNativeHistory({messages:[{role:'user',content:'earlier'},{role:'assistant',content:'answer'},{role:'user',content:'next'}]},'session','model','/project/subdir','provider','/project');
  assert.deepEqual(history.messages[1].info.path,{cwd:'/project/subdir',root:'/project'});
 });

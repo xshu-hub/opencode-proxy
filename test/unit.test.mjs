@@ -25,7 +25,8 @@ test('workingDirectory resolves relative to the config file and rejects invalid 
   assert.equal(normalizeConfig({ mode: 'global', workingDirectory: relative }, directory).workingDirectory, path.join(directory, relative));
   const absolute = path.resolve(relative);
   assert.equal(normalizeConfig({ mode: 'global', workingDirectory: absolute }, directory).workingDirectory, absolute);
-  assert.equal(normalizeConfig({ mode: 'global' }, directory).workingDirectory, undefined);
+  assert.equal(normalizeConfig({ mode: 'global' }, directory).workingDirectory, os.homedir());
+  assert.equal(normalizeConfig({ mode: 'global', workerSharing: false }, directory).workingDirectory, undefined);
   for (const workingDirectory of ['', '   ', '\0', null, false, 42, [], {}]) assert.throws(() => normalizeConfig({ mode: 'global', workingDirectory }, directory), /workingDirectory/);
 });
 
@@ -45,7 +46,7 @@ test('missing directories and file paths fail before OpenCode starts and cleanup
       assert.ok(result.error.message.includes(workingDirectory));
       assert.equal(bridge.active, 0);
       assert.equal(await readFile(sentinel, 'utf8'), 'user-owned');
-      await assert.rejects(() => stat(temporary), { code: 'ENOENT' });
+      if (temporary) await assert.rejects(() => stat(temporary), { code: 'ENOENT' });
       const catalog = new OpenCodeBridge({ mode: 'global', workingDirectory, command: [path.join(directory, 'missing-opencode.exe')] });
       try {
         await assert.rejects(catalog.loadModels(), { code: 'opencode_working_directory', status: 503 });

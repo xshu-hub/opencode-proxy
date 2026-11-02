@@ -55,7 +55,7 @@ test('slow process disposal does not serialize other evictions and shutdown wait
 
 test('hot targets deduplicate model aliases and rotate toward recently requested models',async()=>{
  const a={model:'fixture/a',context:10000,output:1000},b={model:'fixture/b',context:10000,output:1000},c={model:'fixture/c',context:10000,output:1000};
- const bridge=new OpenCodeBridge({mode:'global',discoverModels:false,maxIdleWorkers:2,models:{a,alias:a,b,c}});bridge.replenish=async()=>{};
+ const bridge=new OpenCodeBridge({mode:'global',workerSharing:false,discoverModels:false,maxIdleWorkers:2,models:{a,alias:a,b,c}});bridge.replenish=async()=>{};
  try{await bridge.prewarm(['a','alias','b','c']);assert.deepEqual(bridge.warmTargets,['a','b']);bridge.touchHotModel('c');assert.deepEqual(bridge.warmTargets,['c','a']);bridge.touchHotModel('alias');assert.deepEqual(bridge.warmTargets,['alias','c']);assert.equal(bridge.pool.protectedKeys.size,2);}finally{await bridge.close();}
 });
 test('pausing warmup during catalog loading cannot restore hot targets after stop',async()=>{

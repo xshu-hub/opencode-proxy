@@ -8,7 +8,7 @@ import { createHmac } from 'node:crypto';
 
 // Only disposable credentials and a loopback upstream. Never read or copy the
 // user's OpenCode configuration, auth store or Magpie sign-ins into a test.
-export async function globalProfile({ respond } = {}) {
+export async function globalProfile({ respond, multipleModels = false, resourceMetrics = false } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-magpie-test-'));
   const configDir = path.join(home, 'config', 'opencode');
   const authFile = path.join(home, 'data', 'opencode', 'auth.json');
@@ -27,7 +27,7 @@ export async function globalProfile({ respond } = {}) {
     const expectedSignature = createHmac('sha256', 'fixture-body-signing-key').update(raw).digest('hex');
     requests.push({ body, authorization: req.headers.authorization, marker: req.headers['x-fixture-opencode'],
       hook: req.headers['x-fixture-hook'], cookie: req.headers.cookie, signature: req.headers['x-fixture-body-signature'],
-      expectedSignature, affinity: req.headers['x-session-affinity'], userAgent: req.headers['user-agent'], pid: Number(req.headers['x-fixture-pid']) });
+      expectedSignature, affinity: req.headers['x-session-affinity'], userAgent: req.headers['user-agent'], pid: Number(req.headers['x-fixture-pid']), rss: Number(req.headers['x-fixture-rss'] ?? 0), revision: req.headers['x-fixture-revision'] });
     if (req.headers['x-fixture-hook'] !== 'from-chat-headers' || req.headers.cookie !== 'fixture-session=valid' || req.headers['x-fixture-body-signature'] !== expectedSignature) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'Fixture requires hooks and a signature for the actual SDK body' } })); return;
@@ -62,30 +62,34 @@ export async function globalProfile({ respond } = {}) {
   const login = path.join(configDir, 'fixture-auth.mjs');
   await writeFile(login, `import { appendFile } from 'node:fs/promises';
   import { createHmac } from 'node:crypto';
-  export const FixtureAuth = async ({ client }) => {
-    await appendFile(${JSON.stringify(pidsFile)}, JSON.stringify(process.pid) + '\\n');
-    return {
-    'chat.headers': async (_input, output) => {
-      output.headers['x-fixture-hook'] = 'from-chat-headers';
-      output.headers.cookie = 'fixture-session=valid';
-    },
-    auth: { provider: 'fixture', methods: [], loader: async getAuth => ({
+  const authentication = (client, provider) => ({ provider, methods: [], loader: async getAuth => ({
       apiKey: 'sdk-placeholder',
       fetch: async (url, init) => {
         let auth = await getAuth();
-        if (auth.expires < Date.now()) {
+        if (auth.type === 'oauth' && auth.expires < Date.now()) {
           auth = { type: 'oauth', ...await fetch(${JSON.stringify(base + '/refresh')}, { method: 'POST' }).then(r => r.json()) };
-          await client.auth.set({ path: { id: 'fixture' }, body: auth });
+          await client.auth.set({ path: { id: provider }, body: auth });
         }
         const headers = new Headers(init.headers);
-        headers.set('authorization', 'Bearer ' + auth.access);
+        headers.set('authorization', 'Bearer ' + (auth.type === 'api' ? auth.key : auth.access));
         headers.set('x-fixture-opencode', 'real-plugin');
         headers.set('x-fixture-pid', String(process.pid));
+        if (${JSON.stringify(resourceMetrics)}) headers.set('x-fixture-rss', String(process.memoryUsage().rss));
         headers.set('x-fixture-body-signature', createHmac('sha256', 'fixture-body-signing-key').update(init.body).digest('hex'));
         return fetch(url, { ...init, headers });
       }
-    }) }
-  }; };\n`);
+    }) });
+  export const FixtureAuth = async ({ client }) => {
+    await appendFile(${JSON.stringify(pidsFile)}, JSON.stringify(process.pid) + '\\n');
+    return {
+      'chat.headers': async (_input, output) => {
+        output.headers['x-fixture-hook'] = 'from-chat-headers';
+        output.headers.cookie = 'fixture-session=valid';
+      },
+      auth: authentication(client, 'fixture'),
+    };
+  };
+  export const SecondaryAuth = async ({ client }) => ${JSON.stringify(multipleModels)} ? { auth: authentication(client, 'fixture-secondary') } : {};\n`);
   const config = {
     $schema: 'https://opencode.ai/config.json',
     model: 'fixture/mock', plugin: [pathToFileURL(login).href],
@@ -93,9 +97,17 @@ export async function globalProfile({ respond } = {}) {
       mock: { name: 'Fixture', temperature: true, tool_call: true, limit: { context: 100000, output: 1000 } },
     } } },
   };
+  if (multipleModels) {
+    config.provider.fixture.models['mock-alt'] = { name: 'Alternate', temperature: true, tool_call: true, limit: { context: 100000, output: 1000 } };
+    config.provider['fixture-secondary'] = { npm: '@ai-sdk/openai-compatible', options: { baseURL: base + '/v1' }, models: {
+      secondary: { name: 'Secondary', temperature: true, tool_call: true, limit: { context: 100000, output: 1000 } },
+      'secondary-alt': { name: 'Secondary alternate', temperature: true, tool_call: true, limit: { context: 100000, output: 1000 } },
+    } };
+  }
   const configPath = path.join(configDir, 'opencode.json'), original = JSON.stringify(config);
   await writeFile(configPath, original);
-  await writeFile(authFile, JSON.stringify({ fixture: { type: 'oauth', access: 'fixture-expired', refresh: 'fixture-refresh', expires: 0 } }));
+  await writeFile(authFile, JSON.stringify({ fixture: { type: 'oauth', access: 'fixture-expired', refresh: 'fixture-refresh', expires: 0 },
+    ...(multipleModels ? { 'fixture-secondary': { type: 'api', key: 'fixture-secondary-key' } } : {}) }));
   const env = {
     HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'appdata'), LOCALAPPDATA: path.join(home, 'localappdata'),
     XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'data'),
