@@ -32,6 +32,8 @@ test('Magpie plugin uses real OpenCode authentication, tools, refresh and shutdo
   assert.equal(whole.choices[0].message.content, '你好，Magpie。');
   assert.equal(whole.usage.total_tokens, 15);
   assert.equal(profile.requests.length, 1, 'One external turn must cause one inference');
+  assert.equal((await readFile(profile.pidsFile, 'utf8')).trim().split('\n').length, 1,
+    'Management calls and hooks must share one plugin instance, including older v1 SDK runtimes');
   assert.equal(profile.requests[0].authorization, 'Bearer fixture-renewed');
   assert.equal(profile.requests[0].marker, 'real-plugin');
   assert.equal(profile.requests[0].body.messages[0].content, 'SYSTEM_SENTINEL');

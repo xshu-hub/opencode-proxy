@@ -89,6 +89,12 @@ npm pack
 
 `test/behavior-integration.test.mjs` 还覆盖三协议首字节早于 EOF、UTF-8 跨网络分片、8 路四轮工具对话、32 路混合供应商流式隔离、并行工具参数增量、签名/加密思考历史、单请求中断、持续输出中的总超时、调用方重试，以及初始化期间一个/全部等待者中断的清理。行为结果写入 `artifacts/behavior-verification.json`。真实 Magpie Bun 宿主测试另验证 RPC 并发关联、工具往返、背压和 `abort` 控制消息。
 
-`npm run test:magpie-host` 还需要 `TEST_MAGPIE_HOST` 指向 Magpie 的 `internal/plugin/host.js`，且 Bun 可用，验证真实宿主加载与转发契约。目前版本门禁限定 OpenCode **1.18.x**，本地验证版本为 **1.18.0**。其他 v1 次版本须先确认停止 hook 仍在 SDK 推理之前、通过同组测试后再放开门禁；不能只凭插件类型存在就允许初始化请求继续运行。v2 不支持。
+`npm run test:magpie-host` 还需要 `TEST_MAGPIE_HOST` 指向 Magpie 的 `internal/plugin/host.js`，且 Bun 可用，验证真实宿主加载与转发契约。
+
+0.10.1 移除版本号白名单；健康接口的版本字符串仅用于诊断，允许内网自定义标签。初始化管理调用统一经过正在服务的 OpenCode HTTP 实例，显式绑定同一个目录，兼容旧版插件 SDK 的内部 HTTP 应用与服务实例状态不一致问题。是否可用取决于实际管理接口、供应商配置和推理前 hooks；缺少 hooks、动态请求头或不支持的鉴权行为仍明确报错，不绕过 OpenCode 或回退到 Session 推理。
+
+源码抽查了上游 [1.15.0](https://github.com/anomalyco/opencode/blob/v1.15.0/packages/opencode/src/session/llm.ts)、[1.16.2](https://github.com/anomalyco/opencode/blob/v1.16.2/packages/opencode/src/session/llm/request.ts)、[1.17.0](https://github.com/anomalyco/opencode/blob/v1.17.0/packages/opencode/src/session/llm/request.ts)、[1.18.0](https://github.com/anomalyco/opencode/blob/v1.18.0/packages/opencode/src/session/llm/request.ts)：均按 `chat.params → chat.headers → 模型推理` 排列。初始化期间拦截作用域外的全局 fetch，只放行本实例的必要管理接口；若自定义核心在停止 hook 前尝试用该 fetch 联网，返回 `bootstrap_hook_order`，中止并清理 Session。该保护不能证明任意定制核心使用预先捕获的 fetch 或其他网络库时也安全；内网定制鉴权仍需部署实测。
+
+本地真实进程验证版本为 **1.16.2、1.18.0**；可选 CI 覆盖 Windows/Linux 的 **1.16.2、1.18.35**。源码抽查不等同于逐版本运行测试，v2 未验证。
 
 原桥接核心的 MIT 版权声明保留在 LICENSE 与 NOTICE.txt。

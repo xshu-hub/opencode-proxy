@@ -8,7 +8,7 @@ import { gzipSync } from 'node:zlib';
 
 // Only disposable credentials and a loopback upstream. Never read or copy the
 // user's OpenCode configuration, auth store or Magpie sign-ins into a test.
-export async function globalProfile({ respond } = {}) {
+export async function globalProfile({ respond, bootstrapOutbound = false } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-magpie-test-'));
   const configDir = path.join(home, 'config', 'opencode');
   const authFile = path.join(home, 'data', 'opencode', 'auth.json');
@@ -83,7 +83,10 @@ export async function globalProfile({ respond } = {}) {
   export const FixtureAuth = async ({ client }) => {
     await appendFile(${JSON.stringify(pidsFile)}, JSON.stringify(process.pid) + '\\n');
     return {
-    'chat.params': async () => { while (await access(${JSON.stringify(bootstrapGate)}).then(() => true, () => false)) await new Promise(resolve => setTimeout(resolve, 20)); },
+    'chat.params': async () => {
+      while (await access(${JSON.stringify(bootstrapGate)}).then(() => true, () => false)) await new Promise(resolve => setTimeout(resolve, 20));
+      if (${JSON.stringify(bootstrapOutbound)}) await fetch(${JSON.stringify(base + '/v1/chat/completions')}, { method: 'POST', body: JSON.stringify({ model: 'mock', messages: [{ role: 'user', content: 'UNEXPECTED_BOOTSTRAP_INFERENCE' }] }) });
+    },
     'chat.headers': async (input, output) => { if (input.model.providerID === 'fixture-dynamic') output.headers['x-dynamic-auth'] = 'fixture-signed-per-turn'; },
     auth: { provider: 'fixture', methods: [], loader: async getAuth => ({
       apiKey: 'sdk-placeholder',

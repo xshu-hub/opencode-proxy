@@ -51,3 +51,19 @@ test('wire streaming delivers bytes before EOF and handles redirect, compression
   assert.equal(new TextDecoder().decode((await reader.read()).value), 'first byte');
   controller.abort(); await assert.rejects(reader.read());
 });
+
+test('bootstrap guard blocks unscoped supplier traffic but preserves local control and concurrent authorized calls', async t => {
+  const paths = [];
+  const server = http.createServer((req, res) => { paths.push(req.url); req.resume(); res.end('fixture'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + server.address().port, scope = authFetchScope(), rejected = [];
+  t.after(async () => { await scope.dispose(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); });
+  const release = scope.protectBootstrap(new URL(base), error => rejected.push(error));
+  await assert.rejects(fetch(base + '/v1/chat/completions'), error => error.code === 'bootstrap_hook_order');
+  assert.deepEqual(paths, []); assert.equal(rejected.length, 1);
+  await (await fetch(base + '/global/health')).text();
+  await (await scope.run(undefined, base + '/v1/chat/completions', { method: 'POST', body: '{}' })).text();
+  assert.deepEqual(paths, ['/global/health', '/v1/chat/completions']);
+  release(); await (await fetch(base + '/v1/chat/completions')).text();
+  assert.equal(paths.length, 3); assert.equal(rejected.length, 1);
+});
