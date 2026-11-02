@@ -1,16 +1,14 @@
 # OpenCode Proxy for Magpie
 
-将本机全局 OpenCode 中已可用的模型注册为 Magpie 供应商。所有推理经过真实 OpenCode，保留其供应商配置、登录、认证插件及请求处理。
+把本机全局 OpenCode 中已连接的模型注册为 Magpie 供应商。只安装一个 Magpie 插件；它自动给自己启动的真实 OpenCode v1 进程加载包内辅助插件，不修改 OpenCode 程序，也不把供应商凭证带到 Magpie。
 
-调用链：客户端 → Magpie 网关 → 本插件 → 真实 OpenCode → 供应商。
+调用链：客户端 → Magpie（协议转换、访问 Key、路由、统计）→ 本插件 → OpenCode 进程中的原供应商鉴权 fetch → 模型 API。
 
-Magpie 负责客户端协议转换、访问 Key、路由、模型控制和统计；插件只接受内部 Chat Completions 请求，并将其桥接到 OpenCode。没有独立 HTTP 网关、桌面端、管理界面或配置文件。
+从 0.10.0 开始，业务请求不经过 OpenCode Session 推理、Agent、MCP、工具执行或数据库消息写入。客户端提供的 system、历史、工具、思考参数等原生 JSON 字段保留，只将模型短名替换为真实模型 API ID；响应按字节流转发。没有第二层协议转换、自动工具执行、重试或 Session 回退。
 
 ## 安装
 
-先确保同一运行用户能正常使用全局 OpenCode。Magpie 的插件宿主使用 Bun，本插件不安装或修改 OpenCode。
-
-从本地仓库安装：
+先确认同一运行用户可以正常使用全局 OpenCode。Magpie 插件宿主需要 Bun；本包不安装 OpenCode，运行时仅依赖 HTTP 客户端 Undici。
 
 ```sh
 npm ci --ignore-scripts
@@ -18,67 +16,79 @@ magpie plugin add D:/projects/opencode-proxy
 magpie plugin login opencode-proxy
 ```
 
-也可以在 Magpie 的 Plugins 中添加该目录，再启用供应商 Local OpenCode。支持免密启用的 Magpie 会直接启用；旧版若显示 Key 输入框，填 `local`。这只是本机接入标记，供应商凭证始终由 OpenCode 管理。
+也可以在 Magpie 的 Plugins 中添加本地仓库目录，启用 **Local OpenCode**。支持免密启用的版本直接启用；旧版若显示 Key 输入框，填 `local`，它只是本机接入标记。发布 npm 包后可使用 `magpie plugin add @xshu-hub/opencode-proxy`，本次改造不自动发布。
 
-发布 npm 包后可使用 `magpie plugin add @xshu-hub/opencode-proxy`；本次改造不会自动发布。
+在 Magpie 中刷新供应商模型并选择 `opencode-proxy/<短模型名>`。重名模型保留供应商前缀；仅发布已连接的供应商模型。目录不包含凭证、供应商地址或请求头，也不将 Magpie 自身模型回流。
 
-在 Magpie 中刷新供应商模型后选择 `opencode-proxy/<短模型名>`，例如 `opencode-proxy/deepseek-flash`。重名模型保留供应商前缀以消除歧义。插件只发布已连接的 OpenCode 供应商模型，不暴露凭证、上游地址或请求头；Magpie 自身及本插件的模型不回流到模型列表。
+**只在 Magpie 安装。** 无需手动修改 OpenCode 的 plugin 配置；原有供应商认证插件继续由 OpenCode 加载。
 
-**仅安装在 Magpie 中。** 不要将本包加入 OpenCode 的 plugin 配置；OpenCode 内仍使用原有供应商认证插件。
+## 配置
 
-## 可选配置
-
-在 Magpie 中打开 **Plugins → Installed → Local OpenCode → Options**，编辑 JSON 后保存，再关闭并重新启用插件。首次使用本地目录插件或更新插件元数据后，可重启 Magpie 以刷新 Options 入口。
-
-指定工作目录时，在现有 JSON 中加入 `workingDirectory`（目录必须已存在；Windows 路径建议使用正斜杠）：
-
-```json
-{
-  "workingDirectory": "D:/projects/your-project"
-}
-```
-
-配置通过 Magpie 插件的 Options 保存，无需另建 config.json。其余可选参数例如：
+打开 **Plugins → Installed → Local OpenCode → Options**，编辑 JSON、保存并重新启用插件。更新插件元数据后可重启 Magpie 刷新 Options 入口。配置由 Magpie 保存，无需另建 config.json。
 
 ```json
 {
   "command": ["opencode"],
-  "workerReuse": true,
-  "maxIdleWorkers": 2,
-  "workerIdleMs": 60000,
-  "startupTimeoutMs": 15000,
+  "workingDirectory": "D:/projects/your-project",
+  "startupTimeoutMs": 20000,
   "firstOutputTimeoutMs": 120000,
   "idleTimeoutMs": 180000,
   "timeoutMs": 0
 }
 ```
 
-`command` 是程序及可选启动参数数组；绝对路径适用于 Magpie 找不到 PATH 中 OpenCode 的情况。`workingDirectory` 可指定 OpenCode 使用的真实目录。`workerSharing: true` 可启用兼容 OpenCode 1 的共享进程模式，必须同时指定真实目录；默认关闭。
+- `command`：程序与可选启动参数数组；可用绝对路径解决 PATH 问题。
+- `workingDirectory`：已存在的真实目录；可省略，默认用户主目录。相对路径以 Magpie 提供的目录为基准。
+- `startupTimeoutMs`：进程和插件启动时限。
+- `firstOutputTimeoutMs`：从接收请求到上游首个响应字节的时限，包含首次传输初始化。
+- `idleTimeoutMs`：后续输出间隔时限；下游背压等待不计入空闲时限。
+- `timeoutMs`：整次转发时限，`0` 表示不设总时限。
 
-配置保存后重新启用插件以确保宿主载入新配置。默认推理并发不限，由 Magpie 的供应商设置控制接入并发。模型发现不发起推理，也不自动预热。健康进程在完成清理后复用，默认最多保留两个空闲进程，60 秒后回收。
+默认不限制推理并发，接入并发由 Magpie 控制。一个插件实例常驻一个 OpenCode 进程；业务请求不会增加进程。刷新模型时，若有未完成请求会返回忙碌；空闲时先退出旧进程，再启动一个进程读取全局配置和凭证。异常退出后返回错误，刷新模型或重新启用插件可恢复，不重放业务请求。
 
-## 行为与边界
+旧版已保存的 `workerSharing`、`workerReuse:true`、`maxIdleWorkers`、`workerIdleMs` 可继续读取，但不再控制进程池。`workerReuse:false` 会报错，需移除。
 
-- 仍通过 OpenCode 的公开会话 API 和 hooks 完成推理；这次改造删除外围产品层，不改变为供应商直连。
-- 保留客户端系统提示、历史、函数工具、思考参数与内联附件的 OpenCode 桥接。函数工具由客户端执行，本地内置工具受限，不继续自动推理。
-- 插件仅声明 Chat Completions，Responses、Messages 等客户端协议由 Magpie 转换；不会再次进行这些协议的转换，也不提供 Responses 存储接口。
-- 模型与输入能力来自 OpenCode 的模型目录。供应商签名思考块、加密推理、远程文件和托管工具受 Magpie 转换、OpenCode SDK 及供应商能力限制。
-- 原生工具名称和 ID 可先返回，参数要等 OpenCode 发布完整 JSON；插件无法补出逐字符参数增量。流式文本、usage、背压、取消和错误继续传递。
-- 模型发现随 Magpie 刷新；失败时让 Magpie 保留其上次模型列表并显示失败。插件不采集持久化统计、不保存请求日志，也不提供账号余额或供应商价格数据。
-- OpenCode 重试被中止时保留上游报错原因；免费用量或额度超限按 429 返回。模型出现在列表中并不代表当前账号仍有该模型的可用额度。
-- Magpie 退出或重启插件宿主后，桥接工作进程会检测父进程退出并停止。正常释放时先取消推理、删除会话并确认清理，再归还进程。
+## 支持范围
 
-## 开发与验证
+| OpenCode 模型 SDK | 交给 Magpie 的原生 API |
+| --- | --- |
+| `@ai-sdk/openai-compatible` | Chat Completions |
+| `@ai-sdk/openai` | Responses |
+| `@ai-sdk/anthropic` | Messages |
+
+Magpie 根据每个模型的 SDK 选择转换目标。本插件只负责原生请求传输，不提供 Responses 存储等管理接口。文本、附件、签名思考块、托管工具等字段的可用性仍取决于 Magpie 的转换和供应商接口。
+
+供应商鉴权 loader 的自定义 `fetch`、静态 API Key、供应商/模型配置请求头在真实 OpenCode 进程内使用。为了避免 Bun 原生 fetch 的大响应预取，仅在当前鉴权调用的异步作用域内将网络 fetch 交给 Undici；作用域以外继续调用原 fetch，不修改 OpenCode 程序文件。支持环境 HTTP(S) 代理。OAuth 并发刷新协调适用于 OpenCode 文件认证库中已过期的 OAuth 状态；实际刷新与保存仍由原认证插件完成。外部凭证库、提前刷新策略及任意第三方认证插件不能据此视为已经兼容。
+
+使用每轮 `chat.headers` 动态签名、未知 SDK、含查询参数或模板占位符的特殊地址，会明确报兼容性错误。绕过作用域 fetch、缓冲/包装响应，或使用 Bun 特有 TLS/代理选项的认证插件也返回 501，不静默丢失鉴权语义或流控。该路径不运行供应商 SDK 的请求改写；原认证 fetch 自身仍能改写请求，依赖这些行为的供应商需要单独验证。
+
+## 生命周期与资源
+
+发现模型不发起推理。每个模型首次使用时，创建一个临时初始化 Session，在 v1 的 `chat.params`/`chat.headers` hooks 取得鉴权传输，并在 SDK 推理前停止，随后中止、删除该 Session，才放行业务请求。同模型并发首次请求共享一次初始化；不同模型的初始化依次进行，已初始化模型的转发并行执行。
+
+因此启动及初始化仍涉及 OpenCode 的数据库、配置加载和常驻内存；不能称为完全无 Session、无数据库或零 OpenCode 开销。数据库隔离在插件临时目录，业务请求不写入会话历史，不向供应商注入 OpenCode 内置提示词和工具。项目指令、外部 skills、MCP、快照与文件监视在该实例中关闭；用户原配置不被覆盖。
+
+请求体上限 16 MiB。私有链路使用 256 KiB 字节窗口限制预取，按下游读取进度补充额度，既不解析也不改写流内容。取消通过私有控制接口传到上游，避免运行时未报告断连造成悬挂。首字节前超时返回 504；流已经开始后的失败中断流，不伪造成功结束。保留上游 HTTP 状态与错误正文。插件不记录请求内容或持久化统计。
+
+多轮对话的完整历史由调用方逐轮提交，不保存在 OpenCode Session 中。函数工具的分片参数、并行调用、调用 ID 与工具结果按原生协议传递，工具由客户端执行。不同请求可使用相同工具调用 ID，不共享历史、工具定义、取消信号或超时状态。
+
+插件默认不自动重试。首字节前超时返回 504，连接失败返回 503，上游 429/503 及 `Retry-After` 原样返回，由调用方按自己的策略重新提交；取消与已经输出部分数据的请求不在插件内重放。原生 SSE 的事件语义和完成标记由 Magpie/客户端处理，插件不生成虚假的完成事件。
+
+正常释放会取消请求、停止 OpenCode 并移除临时目录；OpenCode 辅助插件也检测 Magpie 宿主退出。OpenCode 的全局认证/供应商配置继续保留，认证插件正常刷新令牌时仍可更新自己的认证库。
+
+## 开发与测试
 
 ```sh
 npm ci --ignore-scripts
-npm run check
 npm test
+npm run check
 npm pack
 ```
 
-`npm run test:integration` 需要设置 `TEST_OPENCODE_COMMAND` 为真实 OpenCode 程序的 JSON 命令数组。测试使用临时用户配置及本地模拟供应商，不使用生产凭证。
+`npm run test:integration` 需要 `TEST_OPENCODE_COMMAND` 为真实 OpenCode v1 命令的 JSON 数组。全部使用临时用户配置、虚构凭证和回环模拟供应商，不使用生产凭证。覆盖冷启动 64 并发、三轮 64 并发、OAuth 刷新去重、原生三协议、提示词/工具原样传递、超时、取消、背压、模型刷新及退出清理；资源采样写入忽略 Git 的 `artifacts/native-transport.json`。模拟服务结果不代表真实供应商吞吐或长期内存稳定性。
 
-`npm run test:magpie-host` 需要 `TEST_MAGPIE_HOST` 指向 Magpie 的 `internal/plugin/host.js`，且 Bun 可用；使用独立临时宿主配置验证插件加载和模型/请求契约。
+`test/behavior-integration.test.mjs` 还覆盖三协议首字节早于 EOF、UTF-8 跨网络分片、8 路四轮工具对话、32 路混合供应商流式隔离、并行工具参数增量、签名/加密思考历史、单请求中断、持续输出中的总超时、调用方重试，以及初始化期间一个/全部等待者中断的清理。行为结果写入 `artifacts/behavior-verification.json`。真实 Magpie Bun 宿主测试另验证 RPC 并发关联、工具往返、背压和 `abort` 控制消息。
 
-桥接核心保留原 Magpie MIT 版权声明，见 LICENSE 和 NOTICE.txt。
+`npm run test:magpie-host` 还需要 `TEST_MAGPIE_HOST` 指向 Magpie 的 `internal/plugin/host.js`，且 Bun 可用，验证真实宿主加载与转发契约。目前版本门禁限定 OpenCode **1.18.x**，本地验证版本为 **1.18.0**。其他 v1 次版本须先确认停止 hook 仍在 SDK 推理之前、通过同组测试后再放开门禁；不能只凭插件类型存在就允许初始化请求继续运行。v2 不支持。
+
+原桥接核心的 MIT 版权声明保留在 LICENSE 与 NOTICE.txt。

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { OpenCodeProxyPlugin } from '../index.mjs';
-import { sseEvents } from '../lib/protocol.mjs';
+import { sseEvents } from './sse.mjs';
 import { toolCalls } from './tool-deltas.mjs';
 import { globalProfile } from './global-profile.mjs';
 

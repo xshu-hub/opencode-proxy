@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import { createPlugin } from '../lib/magpie-plugin.mjs';
-import { ApiError } from '../lib/protocol.mjs';
+import { ApiError, MAX_BODY } from '../lib/transport-common.mjs';
 
 const url = 'http://opencode-proxy.invalid/v1/chat/completions';
 const auth = { type: 'api', key: 'local' };
@@ -63,7 +63,6 @@ test('model discovery publishes capabilities and short ids, never backend creden
   assert.equal(listed.coder.capabilities.reasoning, true);
   assert.deepEqual(Object.keys(listed.coder.variants), ['low', 'high']);
   assert.doesNotMatch(JSON.stringify(listed), /PRIVATE|private\.invalid|vendor\/coder/);
-  assert.equal(f.instances[0].config.mode, 'global');
   assert.equal(f.instances[0].config.maxConcurrent, 0);
 });
 
@@ -83,6 +82,23 @@ test('requests reuse the bridge and preserve Chat bodies without forwarding Magp
   assert.equal(args[0][1].headers, undefined);
 });
 
+test('native SDK metadata and payloads pass through for Responses and Messages', async t => {
+  const f = await fixture(t, { catalog: { responses: { ...model, npm: '@ai-sdk/openai' }, messages: { ...model, npm: '@ai-sdk/anthropic' } } });
+  const catalog = await f.list(), loader = await f.loader();
+  assert.equal(catalog.responses.api.npm, '@ai-sdk/openai'); assert.equal(catalog.messages.api.npm, '@ai-sdk/anthropic');
+  for (const [model, endpoint, payload] of [['responses', 'responses', { input: 'hello', instructions: 'SYSTEM' }], ['messages', 'messages', { messages: [], max_tokens: 100, system: 'SYSTEM' }]]) {
+    const body = { model, ...payload };
+    await (await loader.fetch('http://opencode-proxy.invalid/v1/' + endpoint, { method: 'POST', body: JSON.stringify(body) })).text();
+    assert.deepEqual(JSON.parse(f.calls.at(-1).request[1].body), body);
+  }
+});
+
+test('oversized request bodies are rejected before starting inference', async t => {
+  const f = await fixture(t), loader = await f.loader();
+  const response = await loader.fetch(url, { method: 'POST', body: JSON.stringify({ model: 'coder', messages: [], padding: 'x'.repeat(MAX_BODY) }) });
+  assert.equal(response.status, 413); assert.equal(f.instances.length, 0);
+});
+
 test('streaming responses and upstream errors pass through without buffering or protocol conversion', async t => {
   const f = await fixture(t);
   await f.list();
@@ -99,7 +115,7 @@ test('streaming responses and upstream errors pass through without buffering or 
   assert.equal(await loader.fetch(url, { method: 'POST', body: '{"model":"coder","messages":[]}' }), upstream);
 });
 
-test('authentication revocation and malformed or non-Chat calls never reach the bridge', async t => {
+test('authentication revocation and malformed or unknown calls never reach the transport', async t => {
   const f = await fixture(t);
   await assert.rejects(f.hooks.auth.loader(async () => null), /Enable local/);
   let signedIn = auth;

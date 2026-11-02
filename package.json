@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/opencode-proxy",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "description": "Magpie provider plugin through the real local OpenCode program",
   "license": "MIT",
@@ -24,15 +24,13 @@
     "provider"
   ],
   "scripts": {
-    "test": "node --test test/unit.test.mjs test/command.test.mjs test/reasoning.test.mjs test/catalog.test.mjs test/stream.test.mjs test/lifecycle.test.mjs test/hot-path.test.mjs test/compatibility.test.mjs test/dsml-tools.test.mjs test/shared.test.mjs test/magpie-plugin.test.mjs",
+    "test": "node --test test/auth-fetch.test.mjs test/command.test.mjs test/catalog.test.mjs test/transport.test.mjs test/magpie-plugin.test.mjs",
     "check": "node scripts/check.mjs",
-    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs test/magpie-integration.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/transport-integration.test.mjs test/magpie-integration.test.mjs test/behavior-integration.test.mjs",
     "test:magpie-host": "node --test test/magpie-host.test.mjs"
   },
-  "dependencies": {
-    "@opencode-ai/plugin": "1.18.35",
-    "ajv": "8.20.0",
-    "ajv-formats": "3.0.1"
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.35"
   },
   "repository": {
     "type": "git",
@@ -41,9 +39,13 @@
   "magpie": {
     "name": "Local OpenCode",
     "options": {
-      "command": ["opencode"],
-      "workerReuse": true,
-      "maxIdleWorkers": 2
+      "command": [
+        "opencode"
+      ],
+      "startupTimeoutMs": 20000
     }
+  },
+  "dependencies": {
+    "undici": "7.30.1"
   }
 }
