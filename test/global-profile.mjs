@@ -8,11 +8,12 @@ import { gzipSync } from 'node:zlib';
 
 // Only disposable credentials and a loopback upstream. Never read or copy the
 // user's OpenCode configuration, auth store or Magpie sign-ins into a test.
-export async function globalProfile({ respond, bootstrapOutbound = false, bootstrapPreparation = false } = {}) {
+export async function globalProfile({ respond, bootstrapOutbound = false, bootstrapPreparation = false, dynamicHeaders = false } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-magpie-test-'));
   const configDir = path.join(home, 'config', 'opencode');
   const authFile = path.join(home, 'data', 'opencode', 'auth.json');
   const pidsFile = path.join(home, 'worker-pids.jsonl');
+  const headersFile = path.join(home, 'header-hooks.jsonl');
   const bootstrapGate = path.join(home, 'bootstrap-gate');
   const mcpMarker = path.join(home, 'mcp-started'), mcpScript = path.join(home, 'mcp-sentinel.mjs');
   await writeFile(mcpScript, `import { writeFile } from 'node:fs/promises'; await writeFile(${JSON.stringify(mcpMarker)}, 'started');`);
@@ -32,7 +33,7 @@ export async function globalProfile({ respond, bootstrapOutbound = false, bootst
     let raw = ''; for await (const part of req) raw += part;
     const body = JSON.parse(raw);
     active++; peak = Math.max(peak, active); res.once('close', () => active--);
-    requests.push({ body, path: req.url, authorization: req.headers.authorization, apiKey: req.headers['x-api-key'], marker: req.headers['x-fixture-opencode'], userAgent: req.headers['user-agent'], session: req.headers['x-session-id'], option: req.headers['x-fixture-option'], modelHeader: req.headers['x-fixture-model'], preflight: req.headers['x-fixture-preflight'] });
+    requests.push({ body, path: req.url, authorization: req.headers.authorization, apiKey: req.headers['x-api-key'], marker: req.headers['x-fixture-opencode'], userAgent: req.headers['user-agent'], session: req.headers['x-session-id'], affinity: req.headers['x-session-affinity'], option: req.headers['x-fixture-option'], modelHeader: req.headers['x-fixture-model'], preflight: req.headers['x-fixture-preflight'], signature: req.headers['x-dynamic-auth'], nonce: req.headers['x-fixture-nonce'], messageID: req.headers['x-fixture-message'] });
     if (respond && await respond({ req, res, body })) return;
     const text = JSON.stringify(body.messages ?? body.input ?? body);
     if (text.includes('CONCURRENT_')) await new Promise(resolve => setTimeout(resolve, 150));
@@ -84,6 +85,7 @@ export async function globalProfile({ respond, bootstrapOutbound = false, bootst
   await writeFile(path.join(configDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { '@opencode-ai/plugin': manifest.version } }, 'node_modules/@opencode-ai/plugin': { version: manifest.version } } }));
   const login = path.join(configDir, 'fixture-auth.mjs');
   await writeFile(login, `import { appendFile, access } from 'node:fs/promises';
+  import { randomUUID, createHmac } from 'node:crypto';
   export const FixtureAuth = async ({ client }) => {
     await appendFile(${JSON.stringify(pidsFile)}, JSON.stringify(process.pid) + '\\n');
     let ticket;
@@ -97,7 +99,16 @@ export async function globalProfile({ respond, bootstrapOutbound = false, bootst
       }
       if (${JSON.stringify(bootstrapOutbound)}) await fetch(${JSON.stringify(base + '/v1/chat/completions')}, { method: 'POST', body: JSON.stringify({ model: 'mock', messages: [{ role: 'user', content: 'UNEXPECTED_BOOTSTRAP_INFERENCE' }] }) });
     },
-    'chat.headers': async (input, output) => { if (input.model.providerID === 'fixture-dynamic') output.headers['x-dynamic-auth'] = 'fixture-signed-per-turn'; },
+    'chat.headers': async (input, output) => {
+      if (${JSON.stringify(dynamicHeaders)}) {
+        const nonce = randomUUID(), messageID = input.message.id, sessionID = input.sessionID;
+        const signature = createHmac('sha256', 'fixture-signing-key').update(sessionID + ':' + messageID + ':' + nonce).digest('hex');
+        await new Promise(resolve => setTimeout(resolve, nonce.charCodeAt(0) % 7));
+        await appendFile(${JSON.stringify(headersFile)}, JSON.stringify({ sessionID, messageID, nonce, signature }) + '\\n');
+        Object.assign(output.headers, { 'x-dynamic-auth': signature, 'x-fixture-nonce': nonce, 'x-fixture-message': messageID });
+        if (input.model.providerID === 'fixture-dynamic') output.headers.authorization = 'Bearer fixture-hook-' + nonce;
+      } else if (input.model.providerID === 'fixture-dynamic') output.headers['x-dynamic-auth'] = 'fixture-signed-per-turn';
+    },
     auth: { provider: 'fixture', methods: [], loader: async getAuth => ({
       apiKey: 'sdk-placeholder',
       fetch: async (url, init) => {
@@ -149,5 +160,5 @@ export async function globalProfile({ respond, bootstrapOutbound = false, bootst
     await new Promise(resolve => { upstream.close(resolve); upstream.closeAllConnections(); });
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
-  return { home, requests, preparations, authFile, configPath, pidsFile, original, holdBootstrap: () => writeFile(bootstrapGate, 'hold'), releaseBootstrap: () => rm(bootstrapGate, { force: true }), mcpStarted: () => readFile(mcpMarker).then(() => true, () => false), refreshes: () => refreshes, activity: () => ({ active, peak, produced }), close };
+  return { home, requests, preparations, authFile, configPath, pidsFile, headersFile, original, holdBootstrap: () => writeFile(bootstrapGate, 'hold'), releaseBootstrap: () => rm(bootstrapGate, { force: true }), mcpStarted: () => readFile(mcpMarker).then(() => true, () => false), refreshes: () => refreshes, activity: () => ({ active, peak, produced }), close };
 }

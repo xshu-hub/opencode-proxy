@@ -18,7 +18,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 test('the real Magpie Bun host loads the package, lists models and streams real OpenCode inference', { timeout: 120000 }, async t => {
   const command = JSON.parse(process.env.TEST_OPENCODE_COMMAND ?? '["opencode"]');
   const bun = await executableCommand(JSON.parse(process.env.TEST_BUN_COMMAND ?? '["bun"]'));
-  const profile = await globalProfile({ respond: ({ res, body }) => {
+  const headerHooks = process.env.TEST_HEADER_HOOKS === 'per-request' ? 'per-request' : 'reject';
+  const profile = await globalProfile({ dynamicHeaders: headerHooks === 'per-request', respond: ({ res, body }) => {
     const id = body.metadata?.user_id;
     if (!id?.startsWith('rpc-isolation-')) return false;
     res.writeHead(200, { 'content-type': 'text/event-stream', 'x-fixture-request': id });
@@ -78,7 +79,7 @@ test('the real Magpie Bun host loads the package, lists models and streams real 
   });
   const init = await rpc('init', {
     authPath: path.join(profile.home, 'magpie-auth.json'), directory: profile.home,
-    plugins: [{ spec: root, target: root, options: { command, startupTimeoutMs: 20000, firstOutputTimeoutMs: 20000, idleTimeoutMs: 200 } }],
+    plugins: [{ spec: root, target: root, options: { command, headerHooks, startupTimeoutMs: 20000, firstOutputTimeoutMs: 20000, idleTimeoutMs: 200 } }],
   });
   assert.equal(init.result.plugins.length, 1);
   assert.equal(init.result.plugins[0].error, undefined, JSON.stringify(init.result));

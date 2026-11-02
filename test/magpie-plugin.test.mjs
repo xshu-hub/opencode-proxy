@@ -46,6 +46,12 @@ test('the plugin rejects recursive installation and old gateway or direct-provid
   }
 });
 
+test('per-request header hooks are an explicit option passed to the real transport', async t => {
+  const f = await fixture(t, { options: { headerHooks: 'per-request' } });
+  await f.list(); assert.equal(f.instances[0].config.headerHooks, 'per-request');
+  await assert.rejects(fixture(t, { options: { headerHooks: 'cache' } }), /headerHooks/);
+});
+
 test('model discovery publishes capabilities and short ids, never backend credentials or recursive routes', async t => {
   const catalog = {
     coder: { ...model, apiKey: 'PRIVATE', baseURL: 'https://private.invalid', headers: { Authorization: 'PRIVATE' } },

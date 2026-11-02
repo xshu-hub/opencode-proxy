@@ -59,11 +59,16 @@ test('bootstrap guard blocks native inference while allowing provider preparatio
   const base = 'http://127.0.0.1:' + server.address().port, scope = authFetchScope(), rejected = [];
   t.after(async () => { await scope.dispose(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); });
   const release = scope.protectBootstrap(error => rejected.push(error));
+  const peerRejections = [], releasePeer = scope.protectBootstrap(error => peerRejections.push(error));
   const blocked = [base + '/v1/chat/completions', new URL(base + '/v1/responses/?key=fixture-private'),
     new Request(base + '/v1/messages', { method: 'POST', body: '{}' }),
     'https://fixture-private@provider.invalid/openai/deployments/model/completions?api_key=fixture-private'];
   for (const input of blocked) await assert.rejects(fetch(input), error => error.code === 'bootstrap_hook_order' && !error.message.includes('fixture-private'));
   assert.deepEqual(paths, []); assert.equal(rejected.length, blocked.length);
+  assert.equal(peerRejections.length, blocked.length);
+  releasePeer();
+  await assert.rejects(fetch(base + '/v1/messages'), error => error.code === 'bootstrap_hook_order');
+  assert.equal(rejected.length, blocked.length + 1); assert.equal(peerRejections.length, blocked.length);
   await (await fetch(base + '/global/health')).text();
   await (await fetch(new URL(base + '/models'))).text();
   await (await fetch(new Request(base + '/custom-auth/preflight', { method: 'POST', body: JSON.stringify({ model: 'fixture' }) }))).text();
@@ -71,5 +76,6 @@ test('bootstrap guard blocks native inference while allowing provider preparatio
   await (await scope.run(undefined, base + '/v1/chat/completions', { method: 'POST', body: '{}' })).text();
   assert.deepEqual(paths, ['/global/health', '/models', '/custom-auth/preflight', '/oauth/token', '/v1/chat/completions']);
   release(); await (await fetch(base + '/v1/chat/completions')).text();
-  assert.equal(paths.length, 6); assert.equal(rejected.length, blocked.length);
+  assert.equal(paths.length, 6); assert.equal(rejected.length, blocked.length + 1);
+  assert.equal(peerRejections.length, blocked.length);
 });

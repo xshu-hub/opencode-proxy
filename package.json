@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/opencode-proxy",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "type": "module",
   "description": "Magpie provider plugin through the real local OpenCode program",
   "license": "MIT",
@@ -26,7 +26,7 @@
   "scripts": {
     "test": "node --test test/auth-fetch.test.mjs test/command.test.mjs test/catalog.test.mjs test/transport.test.mjs test/magpie-plugin.test.mjs",
     "check": "node scripts/check.mjs",
-    "test:integration": "node --test --test-concurrency=1 test/transport-integration.test.mjs test/magpie-integration.test.mjs test/behavior-integration.test.mjs test/runtime-compatibility.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/transport-integration.test.mjs test/magpie-integration.test.mjs test/behavior-integration.test.mjs test/runtime-compatibility.test.mjs test/header-hooks-integration.test.mjs",
     "test:magpie-host": "node --test test/magpie-host.test.mjs"
   },
   "devDependencies": {

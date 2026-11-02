@@ -9,6 +9,9 @@ import { OpenCodeTransport } from '../lib/transport.mjs';
 test('persistent runtime defaults preserve unlimited admission and saved legacy options', () => {
   const config = optionsOf();
   assert.equal(config.maxConcurrent, 0); assert.equal(config.timeoutMs, 0);
+  assert.equal(config.headerHooks, 'reject');
+  assert.equal(optionsOf({ headerHooks: 'per-request' }).headerHooks, 'per-request');
+  assert.throws(() => optionsOf({ headerHooks: 'cache' }));
   assert.deepEqual(config.command, ['opencode']);
   assert.equal(optionsOf({ workerSharing: false, maxIdleWorkers: 2, workerIdleMs: 60000 }).maxConcurrent, 0);
   for (const bad of [null, [], { workerReuse: false }, { workerSharing: 1 }, { command: 'opencode' }, { command: [] }, { workingDirectory: '' }, { timeoutMs: -1 }, { firstOutputTimeoutMs: 0 }, { idleTimeoutMs: NaN }, { startupTimeoutMs: 1.5 }, { maxConcurrent: 1 }]) assert.throws(() => optionsOf(bad));
