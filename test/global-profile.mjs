@@ -8,7 +8,7 @@ import { gzipSync } from 'node:zlib';
 
 // Only disposable credentials and a loopback upstream. Never read or copy the
 // user's OpenCode configuration, auth store or Magpie sign-ins into a test.
-export async function globalProfile({ respond, bootstrapOutbound = false } = {}) {
+export async function globalProfile({ respond, bootstrapOutbound = false, bootstrapPreparation = false } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'opencode-magpie-test-'));
   const configDir = path.join(home, 'config', 'opencode');
   const authFile = path.join(home, 'data', 'opencode', 'auth.json');
@@ -16,9 +16,13 @@ export async function globalProfile({ respond, bootstrapOutbound = false } = {})
   const bootstrapGate = path.join(home, 'bootstrap-gate');
   const mcpMarker = path.join(home, 'mcp-started'), mcpScript = path.join(home, 'mcp-sentinel.mjs');
   await writeFile(mcpScript, `import { writeFile } from 'node:fs/promises'; await writeFile(${JSON.stringify(mcpMarker)}, 'started');`);
-  const saved = { ...process.env }, requests = [];
+  const saved = { ...process.env }, requests = [], preparations = [];
   let refreshes = 0, active = 0, peak = 0, produced = 0;
   const upstream = http.createServer(async (req, res) => {
+    if (['/bootstrap-metadata', '/custom-auth/preflight'].includes(req.url)) {
+      preparations.push({ method: req.method, path: req.url }); req.resume();
+      res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ nonce: 'fixture-nonce', ticket: 'fixture-preflight-ticket' })); return;
+    }
     if (req.url === '/refresh') {
       refreshes++;
       res.setHeader('content-type', 'application/json');
@@ -28,7 +32,7 @@ export async function globalProfile({ respond, bootstrapOutbound = false } = {})
     let raw = ''; for await (const part of req) raw += part;
     const body = JSON.parse(raw);
     active++; peak = Math.max(peak, active); res.once('close', () => active--);
-    requests.push({ body, path: req.url, authorization: req.headers.authorization, apiKey: req.headers['x-api-key'], marker: req.headers['x-fixture-opencode'], userAgent: req.headers['user-agent'], session: req.headers['x-session-id'], option: req.headers['x-fixture-option'], modelHeader: req.headers['x-fixture-model'] });
+    requests.push({ body, path: req.url, authorization: req.headers.authorization, apiKey: req.headers['x-api-key'], marker: req.headers['x-fixture-opencode'], userAgent: req.headers['user-agent'], session: req.headers['x-session-id'], option: req.headers['x-fixture-option'], modelHeader: req.headers['x-fixture-model'], preflight: req.headers['x-fixture-preflight'] });
     if (respond && await respond({ req, res, body })) return;
     const text = JSON.stringify(body.messages ?? body.input ?? body);
     if (text.includes('CONCURRENT_')) await new Promise(resolve => setTimeout(resolve, 150));
@@ -82,15 +86,22 @@ export async function globalProfile({ respond, bootstrapOutbound = false } = {})
   await writeFile(login, `import { appendFile, access } from 'node:fs/promises';
   export const FixtureAuth = async ({ client }) => {
     await appendFile(${JSON.stringify(pidsFile)}, JSON.stringify(process.pid) + '\\n');
+    let ticket;
     return {
-    'chat.params': async () => {
+    'chat.params': async input => {
       while (await access(${JSON.stringify(bootstrapGate)}).then(() => true, () => false)) await new Promise(resolve => setTimeout(resolve, 20));
+      if (${JSON.stringify(bootstrapPreparation)}) {
+        const metadata = await fetch(new URL(${JSON.stringify(base + '/bootstrap-metadata')})).then(r => r.json());
+        const prepared = await fetch(new Request(${JSON.stringify(base + '/custom-auth/preflight')}, { method: 'POST', body: JSON.stringify({ nonce: metadata.nonce, model: input.model.id }) })).then(r => r.json());
+        ticket = prepared.ticket;
+      }
       if (${JSON.stringify(bootstrapOutbound)}) await fetch(${JSON.stringify(base + '/v1/chat/completions')}, { method: 'POST', body: JSON.stringify({ model: 'mock', messages: [{ role: 'user', content: 'UNEXPECTED_BOOTSTRAP_INFERENCE' }] }) });
     },
     'chat.headers': async (input, output) => { if (input.model.providerID === 'fixture-dynamic') output.headers['x-dynamic-auth'] = 'fixture-signed-per-turn'; },
     auth: { provider: 'fixture', methods: [], loader: async getAuth => ({
       apiKey: 'sdk-placeholder',
       fetch: async (url, init) => {
+        if (${JSON.stringify(bootstrapPreparation)} && !ticket) throw new Error('Provider preparation did not complete.');
         let auth = await getAuth();
         if (auth.expires < Date.now()) {
           auth = { type: 'oauth', ...await fetch(${JSON.stringify(base + '/refresh')}, { method: 'POST' }).then(r => r.json()) };
@@ -99,6 +110,7 @@ export async function globalProfile({ respond, bootstrapOutbound = false } = {})
         const headers = new Headers(init.headers);
         headers.set('authorization', 'Bearer ' + auth.access);
         headers.set('x-fixture-opencode', 'real-plugin');
+        if (ticket) headers.set('x-fixture-preflight', ticket);
         return fetch(url, { ...init, headers });
       }
     }) }
@@ -137,5 +149,5 @@ export async function globalProfile({ respond, bootstrapOutbound = false } = {})
     await new Promise(resolve => { upstream.close(resolve); upstream.closeAllConnections(); });
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
-  return { home, requests, authFile, configPath, pidsFile, original, holdBootstrap: () => writeFile(bootstrapGate, 'hold'), releaseBootstrap: () => rm(bootstrapGate, { force: true }), mcpStarted: () => readFile(mcpMarker).then(() => true, () => false), refreshes: () => refreshes, activity: () => ({ active, peak, produced }), close };
+  return { home, requests, preparations, authFile, configPath, pidsFile, original, holdBootstrap: () => writeFile(bootstrapGate, 'hold'), releaseBootstrap: () => rm(bootstrapGate, { force: true }), mcpStarted: () => readFile(mcpMarker).then(() => true, () => false), refreshes: () => refreshes, activity: () => ({ active, peak, produced }), close };
 }

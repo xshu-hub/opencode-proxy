@@ -93,7 +93,11 @@ npm pack
 
 0.10.1 移除版本号白名单；健康接口的版本字符串仅用于诊断，允许内网自定义标签。初始化管理调用统一经过正在服务的 OpenCode HTTP 实例，显式绑定同一个目录，兼容旧版插件 SDK 的内部 HTTP 应用与服务实例状态不一致问题。是否可用取决于实际管理接口、供应商配置和推理前 hooks；缺少 hooks、动态请求头或不支持的鉴权行为仍明确报错，不绕过 OpenCode 或回退到 Session 推理。
 
-源码抽查了上游 [1.15.0](https://github.com/anomalyco/opencode/blob/v1.15.0/packages/opencode/src/session/llm.ts)、[1.16.2](https://github.com/anomalyco/opencode/blob/v1.16.2/packages/opencode/src/session/llm/request.ts)、[1.17.0](https://github.com/anomalyco/opencode/blob/v1.17.0/packages/opencode/src/session/llm/request.ts)、[1.18.0](https://github.com/anomalyco/opencode/blob/v1.18.0/packages/opencode/src/session/llm/request.ts)：均按 `chat.params → chat.headers → 模型推理` 排列。初始化期间拦截作用域外的全局 fetch，只放行本实例的必要管理接口；若自定义核心在停止 hook 前尝试用该 fetch 联网，返回 `bootstrap_hook_order`，中止并清理 Session。该保护不能证明任意定制核心使用预先捕获的 fetch 或其他网络库时也安全；内网定制鉴权仍需部署实测。
+源码抽查了上游 [1.15.0](https://github.com/anomalyco/opencode/blob/v1.15.0/packages/opencode/src/session/llm.ts)、[1.16.2](https://github.com/anomalyco/opencode/blob/v1.16.2/packages/opencode/src/session/llm/request.ts)、[1.17.0](https://github.com/anomalyco/opencode/blob/v1.17.0/packages/opencode/src/session/llm/request.ts)、[1.18.0](https://github.com/anomalyco/opencode/blob/v1.18.0/packages/opencode/src/session/llm/request.ts)：均按 `chat.params → chat.headers → 模型推理` 排列。
+
+0.10.2 将初始化联网保护收窄为原生推理端点保护。供应商在 hooks 前的元数据查询、自定义鉴权预检和令牌请求继续由 OpenCode 执行；不再因为它们访问了其他服务而返回 `bootstrap_hook_order`。初始化期间，作用域外的全局 fetch 若访问以 `/chat/completions`、`/completions`、`/responses` 或 `/messages` 结尾的接口，仍返回该错误并清理 Session，错误仅显示接口类别，不包含地址、查询参数、请求内容或凭证。已初始化模型的业务请求不受该保护影响，可与其他模型的初始化并发执行。
+
+该保护按原生接口路径识别请求，不是通用网络沙箱；不读取或转换请求正文。定制核心若把推理改写到其他路径、使用预先捕获的 fetch 或其他网络库，不能据此证明初始化不会推理；内网定制鉴权和推理前 hook 顺序仍需部署实测。
 
 本地真实进程验证版本为 **1.16.2、1.18.0**；可选 CI 覆盖 Windows/Linux 的 **1.16.2、1.18.35**。源码抽查不等同于逐版本运行测试，v2 未验证。
 

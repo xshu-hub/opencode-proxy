@@ -52,18 +52,24 @@ test('wire streaming delivers bytes before EOF and handles redirect, compression
   controller.abort(); await assert.rejects(reader.read());
 });
 
-test('bootstrap guard blocks unscoped supplier traffic but preserves local control and concurrent authorized calls', async t => {
+test('bootstrap guard blocks native inference while allowing provider preparation and concurrent authorized calls', async t => {
   const paths = [];
   const server = http.createServer((req, res) => { paths.push(req.url); req.resume(); res.end('fixture'); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port, scope = authFetchScope(), rejected = [];
   t.after(async () => { await scope.dispose(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); });
-  const release = scope.protectBootstrap(new URL(base), error => rejected.push(error));
-  await assert.rejects(fetch(base + '/v1/chat/completions'), error => error.code === 'bootstrap_hook_order');
-  assert.deepEqual(paths, []); assert.equal(rejected.length, 1);
+  const release = scope.protectBootstrap(error => rejected.push(error));
+  const blocked = [base + '/v1/chat/completions', new URL(base + '/v1/responses/?key=fixture-private'),
+    new Request(base + '/v1/messages', { method: 'POST', body: '{}' }),
+    'https://fixture-private@provider.invalid/openai/deployments/model/completions?api_key=fixture-private'];
+  for (const input of blocked) await assert.rejects(fetch(input), error => error.code === 'bootstrap_hook_order' && !error.message.includes('fixture-private'));
+  assert.deepEqual(paths, []); assert.equal(rejected.length, blocked.length);
   await (await fetch(base + '/global/health')).text();
+  await (await fetch(new URL(base + '/models'))).text();
+  await (await fetch(new Request(base + '/custom-auth/preflight', { method: 'POST', body: JSON.stringify({ model: 'fixture' }) }))).text();
+  await (await fetch(base + '/oauth/token', { method: 'POST', body: 'grant_type=refresh_token' })).text();
   await (await scope.run(undefined, base + '/v1/chat/completions', { method: 'POST', body: '{}' })).text();
-  assert.deepEqual(paths, ['/global/health', '/v1/chat/completions']);
+  assert.deepEqual(paths, ['/global/health', '/models', '/custom-auth/preflight', '/oauth/token', '/v1/chat/completions']);
   release(); await (await fetch(base + '/v1/chat/completions')).text();
-  assert.equal(paths.length, 3); assert.equal(rejected.length, 1);
+  assert.equal(paths.length, 6); assert.equal(rejected.length, blocked.length);
 });

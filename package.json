@@ -1,6 +1,6 @@
 {
   "name": "@xshu-hub/opencode-proxy",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "type": "module",
   "description": "Magpie provider plugin through the real local OpenCode program",
   "license": "MIT",
